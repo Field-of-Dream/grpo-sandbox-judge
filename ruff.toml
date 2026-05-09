@@ -1,0 +1,36 @@
+line-length = 100
+target-version = "py310"
+
+[lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "PYI", # flake8-pyi
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "B008",  # do not perform function calls in argument defaults
+    "C901",  # too complex
+    "SIM115",  # use context handler for opening files
+]
+
+[lint.per-file-ignores]
+"__init__.py" = ["F401", "F403"]
+"benchmark/*" = ["E501", "N802", "N803"]
+"tests/*" = ["B011", "C901"]
+
+[lint.isort]
+known-first-party = ["grpo_in_sandbox"]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "lf"

@@ -1,0 +1,89 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grpo-in-sandbox"
+version = "0.2.0"
+description = "GRPO-based agentic RL training library with code sandbox environment"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Author", email = "author@example.com"}
+]
+keywords = ["reinforcement-learning", "grpo", "llm", "agent", "sandbox"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "docker>=7.0.0",
+    "fire>=0.5.0",
+    "litellm>=1.0.0",
+    "pyyaml>=6.0.0",
+    "rich>=13.0.0",
+    "datasets>=2.0.0",
+    "tqdm>=4.0.0",
+    "pydantic>=2.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+    "pre-commit>=3.0.0",
+]
+training = [
+    "unsloth>=2024.1.0",
+    "transformers>=4.30.0",
+    "torch>=2.0.0",
+    "trl>=0.4.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/example/grpo-in-sandbox"
+Repository = "https://github.com/example/grpo-in-sandbox"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["grpo_in_sandbox*"]
+
+[tool.setuptools.package-data]
+grpo_in_sandbox = ["config/*.yaml", "benchmark/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --strict-markers"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "PYI"]
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"benchmark/*" = ["E501"]
