@@ -13,7 +13,7 @@ agent actions (bash commands, file edits, etc.) into readable strings.
 """
 
 from typing import Dict
-from .action import Action
+from action import Action
 
 # 当智能体未调用任何工具时返回的提示消息
 CONTINUE_MSG = """

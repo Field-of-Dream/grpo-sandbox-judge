@@ -34,9 +34,9 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.markup import escape
 
-from .docker_runtime import DockerRuntime
-from .agent import Agent, AgentArgs, get_logger
-from .trajectory import Trajectory
+from docker_runtime import DockerRuntime
+from agent import Agent, AgentArgs, get_logger
+from trajectory import Trajectory
 
 # Rich控制台
 console = Console()

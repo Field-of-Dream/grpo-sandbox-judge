@@ -55,10 +55,6 @@ training = [
 Homepage = "https://github.com/example/grpo-in-sandbox"
 Repository = "https://github.com/example/grpo-in-sandbox"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["grpo_in_sandbox*"]
-
 [tool.setuptools.package-data]
 grpo_in_sandbox = ["config/*.yaml", "benchmark/**/*"]
 

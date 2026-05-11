@@ -28,9 +28,9 @@ from rich.text import Text
 from rich.logging import RichHandler
 from rich.markup import escape
 
-from .action import Action
-from .trajectory import TrajectoryStep, Trajectory
-from .tools import str_replace_editor_tool, execute_bash_tool, submit_tool
+from action import Action
+from trajectory import TrajectoryStep, Trajectory
+from tools import str_replace_editor_tool, execute_bash_tool, submit_tool
 
 
 def get_logger(name: str) -> logging.Logger:

@@ -401,11 +401,6 @@ def profile_to_agent_args(
     log.debug(f"Profile '{profile.name}' -> AgentArgs: system_prompt length={len(args.system_prompt)}")
     
     return args
-        llm_name=llm_name,
-        llm_base_url=llm_base_url,
-        max_retries=max_retries,
-        **kwargs,
-    )
 
 
 def run_agent_team(
@@ -482,15 +477,6 @@ def run_agent_team(
     log.info(f"=" * 50)
     
     return results
-        except Exception as e:
-            results[profile.name] = {
-                "role": profile.role,
-                "success": False,
-                "error": str(e),
-            }
-    
-    return results
-
 
 __all__ = [
     "AgentProfile",

@@ -20,7 +20,8 @@ __version__ = "0.2.0"
 CMD_TIMEOUT = 120
 DOCKER_PATH = "/usr/local/bin:/usr/bin:/bin:/usr/local/go/bin:/opt/miniconda3/envs/testbed/bin"
 
-from grpo_in_sandbox.train import (
+# When installed as py_modules (root-level files), imports need to be explicit
+from train import (
     train,
     RLHFTrainingConfig,
     ProductManager,
@@ -28,7 +29,7 @@ from grpo_in_sandbox.train import (
     CodeExecutor,
 )
 
-from grpo_in_sandbox.runtime import (
+from runtime import (
     BaseRuntime,
     LocalRuntime,
     DockerRuntime,
@@ -36,9 +37,9 @@ from grpo_in_sandbox.runtime import (
     create_runtime,
 )
 
-from grpo_in_sandbox.agent import Agent, AgentArgs
+from agent import Agent, AgentArgs
 
-from grpo_in_sandbox.agent_configs import (
+from agent_configs import (
     AgentProfile,
     AgentTeam,
     load_team_from_yaml,
@@ -49,9 +50,9 @@ from grpo_in_sandbox.agent_configs import (
     run_agent_team,
 )
 
-from grpo_in_sandbox.trajectory import Trajectory, TrajectoryStep
+from trajectory import Trajectory, TrajectoryStep
 
-from grpo_in_sandbox.config import AgentConfig, load_config
+from config import AgentConfig, load_config
 
 __all__ = [
     "train",

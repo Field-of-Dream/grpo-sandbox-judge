@@ -17,7 +17,7 @@ import shlex
 import docker
 from typing import Dict, Tuple, Any, Optional
 
-from . import CMD_TIMEOUT, DOCKER_PATH
+from __init__ import CMD_TIMEOUT, DOCKER_PATH
 
 
 def get_logger(name: str) -> logging.Logger:
