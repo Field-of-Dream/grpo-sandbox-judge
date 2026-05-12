@@ -132,7 +132,7 @@ class KaggleRuntime:
         finally:
             try:
                 os.unlink(temp_path)
-            except:
+            except OSError:
                 pass
 
     def copy_to_container(self, src_path: str, dest_path: str):

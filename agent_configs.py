@@ -1,3 +1,9 @@
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional, Any
+import logging
+import yaml
+
 """
 Multi-Agent Configuration System - Agent Prompt Library
 
@@ -5,7 +11,6 @@ This module provides a system for defining multiple AI agents that can simulate
 company team members, each with their own role and prompt template.
 
 Usage:
-    from agent_configs import AgentProfile, AgentTeam, load_team_from_yaml
     
     # Define a single agent
     coder = AgentProfile(
@@ -22,7 +27,6 @@ Usage:
     dev_agent = team.get_agent("developer")
 
 Using with Agent:
-    from grpo_in_sandbox import create_team_from_template, profile_to_agent_args, Agent
     
     # Use preset template
     team = create_team_from_template("dev_team")
@@ -36,7 +40,6 @@ Using with Agent:
     trajectory = agent.run(runtime, "Your task here")
 
 Running a team:
-    from grpo_in_sandbox import create_team_from_template, run_agent_team
     
     team = create_team_from_template("dev_team")
     results = run_agent_team(team, "Build a web API", llm_name="openai/gpt-4")
@@ -44,11 +47,6 @@ Running a team:
     # Results: {"TechLead": {...}, "SeniorDev": {...}, "JuniorDev": {...}}
 """
 
-import logging
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
-import yaml
-from pathlib import Path
 
 
 # Module-level logger
@@ -387,7 +385,6 @@ def profile_to_agent_args(
     log.debug(f"Converting profile '{profile.name}' to AgentArgs (llm={llm_name})")
     
     # Local import to avoid circular import
-    from .agent import AgentArgs
     
     args = AgentArgs(
         system_prompt=profile.system_prompt,
@@ -435,7 +432,6 @@ def run_agent_team(
     log.info(f"=" * 50)
     
     # Local import to avoid circular import
-    from .agent import Agent, AgentArgs
     
     results = {}
     

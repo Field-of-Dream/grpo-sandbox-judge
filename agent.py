@@ -1,13 +1,44 @@
 """
-Agent工厂模块 - 支持创建多种类型的Agent
+Agent Module - LLM-powered autonomous agent for code execution.
 
-该模块提供Agent工厂函数，用于创建不同类型的Agent实例：
-- CoderAgent: 专注于代码编写和修改
-- AnalyzerAgent: 专注于分析和调试
-- ResearchAgent: 专注于研究和信息收集
-- GeneralAgent: 通用Agent（默认）
+This module provides an Agent class that uses Large Language Models (LLMs) to:
+- Understand user requests and break them into actionable steps
+- Execute code in isolated sandbox environments (Docker/Kaggle/Local)
+- Use tools like file editor, bash command executor, and submit handler
+- Maintain conversation history and execution trajectory for RL training
 
-同时提供Agent注册表，用于管理多个Agent实例。
+Key Features:
+- Multi-model support: OpenAI, Anthropic, vLLM, SGLang, local models
+- Tool calling: str_replace_editor, execute_bash, submit
+- Token management: Automatic handling of context length limits
+- Retry logic: Exponential backoff for rate limits
+- Trajectory recording: Full execution history for GRPO training
+
+Architecture:
+    User Request
+         |
+         v
+    +-----------+     +-----------+     +---------------+
+    |   LLM     | --> |  Action   | --> |   Runtime    |
+    | (model_query) |  |(_execute_)|  | (Docker/Local)|
+    +-----------+     +-----------+     +---------------+
+         |                |
+         v                v
+    +-----------+     +-----------+
+    | Trajectory|     |Observation|
+    |  Steps   |     |  Result  |
+    +-----------+     +-----------+
+
+Usage:
+    >>> from agent import Agent, AgentArgs
+    >>>
+    >>> args = AgentArgs(
+    ...     llm_name="openai/gpt-4",
+    ...     system_prompt="You are a coding assistant.",
+    ...     instance_prompt="Fix the bug in file.py",
+    ... )
+    >>> agent = Agent(args)
+    >>> result = agent.run()
 """
 
 import os
@@ -63,34 +94,95 @@ def get_logger(name: str) -> logging.Logger:
 
 logger = get_logger(__name__)
 
-#进行数据命名
+# Configuration dataclass
 @dataclass
 class AgentArgs:
-    """Agent 配置参数类
+    """Configuration for Agent initialization.
 
-    用于初始化 Agent 实例的各项配置，包括：
-    - system_prompt: 系统提示词模板
-    - instance_prompt: 实例提示词模板
-    - llm_name: LLM 模型名称
-    - llm_base_url: LLM API 基础 URL（可选）
-    - max_retries: 最大重试次数
-    - save_litellm_response: 是否保存 LLM 请求/响应（用于调试）
-    - output_dir: 输出目录路径
-    - extra_body: 额外的请求参数
-    - quiet: 静默模式（禁用控制台输出，用于基准测试）
+    Args:
+        system_prompt: System prompt template for the LLM.
+            Defines the agent's role and behavior.
+            Example: "You are a Python expert who writes clean code."
+        instance_prompt: Task prompt for this session.
+            The specific task for the agent to complete.
+            Example: "Fix the bug in /testbed/app.py"
+        llm_name: Model identifier for litellm.
+            Format: "provider/model_name"
+            Examples:
+                - "openai/gpt-4"
+                - "anthropic/claude-3-opus-20240229"
+                - "azure/gpt-35-turbo"
+                - "ollama/llama2"
+        llm_base_url: Optional API endpoint for local models.
+            Example: "http://localhost:8000/v1"
+        max_retries: Maximum retry attempts for API calls (default: 5).
+        save_litellm_response: Save request/response to file (default: False).
+            Useful for debugging.
+        output_dir: Directory for saved responses (default: None).
+            Required if save_litellm_response is True.
+        extra_body: Additional parameters for LLM API.
+            Example: {"temperature": 0.7}
+        quiet: Suppress console output (default: False).
+            Set True for benchmark mode.
     """
-    system_prompt: str #模型提示词创建
-    instance_prompt: str #实例提示词创建
-    llm_name: str
-    llm_base_url: Optional[str] = None
-    max_retries: int = 5
-    save_litellm_response: bool = False
-    output_dir: Optional[str] = None
-    extra_body: Optional[Dict[str, Any]] = None
-    quiet: bool = False  # Disable console output (for benchmark mode)
+    system_prompt: str  # System prompt for LLM
+    instance_prompt: str  # Task prompt for this session
+    llm_name: str  # Model name for litellm
+    llm_base_url: Optional[str] = None  # Custom API base URL
+    max_retries: int = 5  # Max API retry attempts
+    save_litellm_response: bool = False  # Save LLM responses
+    output_dir: Optional[str] = None  # Output directory
+    extra_body: Optional[Dict[str, Any]] = None  # Extra API params
+    quiet: bool = False  # Suppress output for benchmarks
 
 
 class Agent:
+    """Autonomous agent for code execution using LLM tool calling.
+
+    The Agent class orchestrates interactions between:
+    1. User task (via instance_prompt)
+    2. LLM (via litellm for multi-provider support)
+    3. Tools (file editor, bash, submit)
+    4. Sandbox runtime (Docker, Kaggle, or Local)
+
+    Execution Flow:
+        1. Initialize with AgentArgs
+        2. Build initial message with system + instance prompt
+        3. Loop (max_steps times):
+            a. Send messages to LLM
+            b. Get tool calls in response
+            c. Execute each tool call
+            d. Add observations to messages
+            e. Check for submit action -> stop
+        4. Return final trajectory
+
+    Attributes:
+        args: Agent configuration.
+        llm_name: Model identifier.
+        llm_base_url: API endpoint (if using local model).
+        system_prompt_template: System prompt string.
+        instance_prompt_template: Task prompt string.
+        quiet: If True, suppress console output.
+        trajectory: Execution history (thought/action/observation).
+        logger: Rich-compatible logger.
+
+    Example:
+        >>> from agent import Agent, AgentArgs
+        >>>
+        >>> args = AgentArgs(
+        ...     llm_name="openai/gpt-4",
+        ...     system_prompt="You are a Python coding assistant.",
+        ...     instance_prompt="Create a file at /testbed/hello.py with 'Hello World'",
+        ... )
+        >>> agent = Agent(args)
+        >>> trajectory = agent.run()
+        >>> print(trajectory.to_json())
+
+    Note:
+        - Uses litellm for unified LLM API (OpenAI, Anthropic, etc.)
+        - Automatically handles token limits with smart truncation
+        - Records full trajectory for RL training
+    """
     """
     Agent 类：负责模型行为控制和与环境交互
 
@@ -206,7 +298,7 @@ class Agent:
         self.logger.info(f"Total tokens in conversation: {total_tokens}")
         
         if total_tokens > max_token_limit:
-            logger.warning(f"Total tokens: {total_tokens} > {max_token_limit}")
+            self.logger.warning(f"Total tokens: {total_tokens} > {max_token_limit}")
             raise ValueError(f"Total tokens: {total_tokens} > {max_token_limit}")
         
         # For locally hosted models with custom base URL, keep the API key from env
@@ -372,29 +464,52 @@ class Agent:
         max_tokens_per_call: int = 65536,
         temperature: float = 1.0,
     ) -> Trajectory:
-        """运行 Agent 执行任务
+        """Execute the agent to complete a task.
 
-        这是 Agent 的核心执行方法，流程如下：
-        1. 准备提示词（system prompt 和 user prompt）
-        2. 初始化对话历史
-        3. 进入主循环，每次迭代：
-           - 查询 LLM 获取响应
-           - 解析响应中的 thought 和 action
-           - 执行 action（执行命令、编辑文件等）
-           - 将执行结果添加到对话历史
-           - 检查是否完成（submit action）
-        4. 返回完整的执行轨迹
+        This is the main execution loop. The agent:
+        1. Builds initial messages (system + task prompt)
+        2. Loops up to max_steps times:
+            a. Queries LLM with current messages
+            b. Parses response for thought + action
+            c. Executes action in sandbox runtime
+            d. Adds observation to messages
+            e. Checks for submit action -> stop if done
+        3. Returns full execution trajectory
 
-        参数:
-            runtime: DockerRuntime 实例，用于执行操作
-            problem_statement: 任务描述
-            max_steps: 最大步数限制
-            max_token_limit: 对话最大 token 数
-            max_tokens_per_call: 每次调用最大生成 token 数
-            temperature: 采样温度
+        Args:
+            runtime: Sandbox runtime for command execution.
+                Types: DockerRuntime, KaggleRuntime, LocalRuntime.
+            problem_statement: The task description.
+                Example: "Fix the bug in /testbed/app.py"
+            max_steps: Max conversation turns (default: 30).
+                Agent stops after this many LLM calls.
+            max_token_limit: Max tokens in conversation (default: 65536).
+                Raises ValueError if exceeded.
+            max_tokens_per_call: Max tokens to generate (default: 65536).
+            temperature: Sampling temperature (default: 1.0).
+                Higher = more creative, lower = more deterministic.
 
-        返回:
-            Trajectory: 包含所有步骤的执行轨迹对象
+        Returns:
+            Trajectory: Full execution history.
+                Contains list of TrajectoryStep with
+                thought, action, observation for each step.
+
+        Raises:
+            ValueError: If total tokens exceed max_token_limit.
+
+        Example:
+            >>> from agent import Agent, AgentArgs
+            >>> from runtime import create_runtime
+            >>>
+            >>> args = AgentArgs(
+            ...     llm_name="openai/gpt-4",
+            ...     system_prompt="You are a coding assistant.",
+            ...     instance_prompt="Create hello.py",
+            ... )
+            >>> agent = Agent(args)
+            >>> runtime = create_runtime("docker")
+            >>> trajectory = agent.run(runtime, "Create hello.py with 'print Hello'")
+            >>> print(f"Completed in {len(trajectory.steps)} steps")
         """
         self.reset()
         self.logger.info(f"Starting agent run:")
@@ -436,16 +551,21 @@ class Agent:
             border_style="cyan",
             padding=(0, 1),
         ))
+        self.console.print(Panel(
+            escape(user_prompt[:2000] + "..." if len(user_prompt) > 2000 else user_prompt),
+            title="[bold cyan]USER PROMPT[/bold cyan]",
+            border_style="cyan",
+            padding=(0, 1),
+        ))
         
         done = False
         step_count = 0
         
         while not done and step_count < max_steps:
-            # Pretty step header
             self.console.print()
             self.console.rule(f"[bold blue]Step {step_count + 1}/{max_steps}[/bold blue]", style="blue")
             
-            # Add step count message to history (R2E style: remaining = max - current)
+            # Add step count message to history
             steps_remaining = max_steps - step_count
             if steps_remaining > 0:
                 step_msg = f"Steps Remaining: {steps_remaining}"
@@ -454,7 +574,6 @@ class Agent:
             self.history[-1]["content"] += f"\n{step_msg}"
             self.logger.info(step_msg)
             
-            # Create messages for this step
             messages = self.history.copy()
             
             # Query LLM
@@ -491,7 +610,7 @@ class Agent:
             # Parse response
             thought, action, tool_call_id = self.parse_response(response)
             
-            # Pretty print thought
+            # Print thought
             if thought:
                 thought_display = thought[:1000] + "..." if len(thought) > 1000 else thought
                 self.console.print(Panel(
@@ -501,7 +620,7 @@ class Agent:
                     padding=(0, 1),
                 ))
             
-            # Pretty print action
+            # Print action
             action_text = f"[bold]{action.function_name}[/bold]"
             if action.parameters:
                 params_str = json.dumps(action.parameters, indent=2, ensure_ascii=False)
@@ -515,10 +634,10 @@ class Agent:
                 padding=(0, 1),
             ))
             
-            # Execute action
+            # Execute and observe
             observation = self._execute_action(action, runtime)
             
-            # Pretty print observation
+            # Print observation
             obs_display = observation[:800] + "..." if len(observation) > 800 else observation
             self.console.print(Panel(
                 escape(obs_display),
@@ -537,7 +656,7 @@ class Agent:
             )
             self.trajectory_steps.append(step_record)
             
-            # Update history with original assistant message (preserves reasoning_content etc.)
+            # Update history
             assistant_msg = response.choices[0].message
             if hasattr(assistant_msg, 'model_dump'):
                 assistant_msg_dict = assistant_msg.model_dump(exclude_none=True)
@@ -566,7 +685,6 @@ class Agent:
                 done = True
                 self.logger.info("Agent submitted answer")
             
-            # Increment step count at end of loop (R2E style)
             step_count += 1
         
         # Create trajectory

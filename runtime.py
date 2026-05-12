@@ -1,10 +1,48 @@
 """
-Runtime Module - Unified Sandbox Runtime Abstraction
+Runtime Module - Unified Sandbox Runtime Abstraction.
 
-This module provides a unified interface for different sandbox runtime backends:
-- DockerRuntime: Runs in Docker containers (for production/multi-language)
-- KaggleRuntime: Runs in Kaggle notebooks
-- LocalRuntime: Runs locally (for development/testing)
+This module provides a unified interface for executing code in isolated environments.
+Supports multiple backends:
+
+    DockerRuntime    - Docker containers (production, multi-language)
+    KaggleRuntime  - Kaggle notebooks
+    LocalRuntime - Local subprocess (development/testing)
+
+Architecture:
+    +------------------+
+    |   BaseRuntime  |  (abstract interface)
+    +------------------+
+            |
+    +----+----+----+
+    |         |       |
+    v         v       v
+  Docker  Kaggle  Local
+
+API:
+    run(code, timeout)      -> (output, exit_code)
+    demux_run(code)       -> (stdout, stderr, exit_code)
+    copy_to_container()   -> copies files to sandbox
+    copy_from_container() -> copies files from sandbox
+    close()           -> cleanup resources
+
+Usage:
+    >>> from runtime import create_runtime
+    >>>
+    >>> # Create runtime (auto-detects based on environment)
+    >>> runtime = create_runtime("docker")
+    >>> # or
+    >>> runtime = create_runtime("local")
+    >>>
+    >>> # Execute code
+    >>> output, exit_code = runtime.run("echo Hello", timeout=30)
+    >>> print(output)  # "Hello\n"
+    >>>
+    >>> # Cleanup
+    >>> runtime.close()
+
+Factory Function:
+    create_runtime(backend: str) -> BaseRuntime
+        backend: "docker", "kaggle", or "local"
 """
 
 from abc import ABC, abstractmethod
@@ -39,7 +77,23 @@ DOCKER_PATH = "/usr/local/bin:/usr/bin:/bin:/usr/local/go/bin:/opt/miniconda3/en
 
 
 class BaseRuntime(ABC):
-    """Abstract base class for sandbox runtimes."""
+    """Abstract base class for sandbox runtimes.
+
+    All runtime implementations must inherit from this class and implement:
+    - run(): Execute code and return output + exit code
+    - demux_run(): Execute with separate stdout/stderr
+    - copy_to_container(): Copy files to sandbox
+    - copy_from_container(): Copy files from sandbox
+    - close(): Cleanup resources
+
+    Attributes:
+        All attributes are implementation-defined.
+
+    Example:
+        >>> class MyRuntime(BaseRuntime):
+        ...     def run(self, code, timeout=30, workdir=None):
+        ...         return f"Ran: {code}", "0"
+    """
     
     @abstractmethod
     def run(self, code: str, timeout: int = 30, workdir: str = None) -> Tuple[str, str]:
@@ -190,7 +244,7 @@ class KaggleRuntime(BaseRuntime):
         finally:
             try:
                 os.unlink(temp_path)
-            except:
+            except OSError:
                 pass
     
     def run(self, code: str, timeout: int = 30, workdir: str = None) -> Tuple[str, str]:

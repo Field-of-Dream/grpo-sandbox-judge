@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
-    {name = "Author", email = "author@example.com"}
+    {name = "severic_brown", email = "hzy2120206638@163.com"}
 ]
 keywords = ["reinforcement-learning", "grpo", "llm", "agent", "sandbox"]
 classifiers = [
@@ -52,8 +52,8 @@ training = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/example/grpo-in-sandbox"
-Repository = "https://github.com/example/grpo-in-sandbox"
+Homepage = "https://github.com/Field-of-Dream/-grpo-sandbox-judge"
+Repository = "https://github.com/Field-of-Dream/-grpo-sandbox-judge"
 
 [tool.setuptools.package-data]
 grpo_in_sandbox = ["config/*.yaml", "benchmark/**/*"]

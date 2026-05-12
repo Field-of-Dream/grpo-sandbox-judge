@@ -1,20 +1,6 @@
-"""
-Observation module - Handles agent action results and continuing messages.
-
-This module provides the Observation class which formats the results of
-agent actions (bash commands, file edits, etc.) into readable strings.
-"""
-
-"""
-观察模块 - 表示智能体执行动作后的环境反馈
-
-本模块定义Observation类，用于封装动作执行后的返回结果，
-包括命令输出、错误码以及stdout/stderr的分离输出。
-"""
-
 from typing import Dict
-from action import Action
 
+from action import Action
 # 当智能体未调用任何工具时返回的提示消息
 CONTINUE_MSG = """
 You forgot to use a function call in your response. 

@@ -6,11 +6,9 @@ This module provides a complete implementation for training language models usin
 
 Key Components:
 - RLHFTrainingConfig: Configuration for training
-- ReferenceModel: Reference model for KL divergence
-- ReplayBuffer: Experience replay buffer
-- GRPOOptimizer: GRPO policy optimization
-- RewardModel: Reward function
-- train(): Main training function with full GRPO loop
+- ProductManager: Task prompt generation
+- RewardModel: Sandbox-based reward scoring
+- GRPOTrainer (via TRL): Unsloth-optimized GRPO training with vLLM acceleration
 
 Usage:
     from grpo_in_sandbox import train, RLHFTrainingConfig
@@ -27,9 +25,13 @@ import os
 import json
 import random
 import logging
+import tempfile
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Tuple, Union
-
+from typing import List, Dict, Any, Optional, Tuple, Union, Callable
+import threading
+import torch
+from transformers import AutoTokenizer
+from unsloth import FastLanguageModel
 
 # Module-level logger
 train_logger = logging.getLogger(__name__)
@@ -48,26 +50,109 @@ def _setup_logger(name: str, level: int = logging.INFO) -> logging.Logger:
         log.setLevel(level)
     return log
 
+
 @dataclass
 class RLHFTrainingConfig:
-    """Configuration for GRPO training."""
+    """Configuration for GRPO (Group Relative Policy Optimization) training.
+
+    This dataclass contains all hyperparameters and settings needed for training a language model
+    using GRPO within a sandbox environment (Docker/Kaggle/Local).
+
+    Args:
+        model_name_or_path: HuggingFace model path or local directory.
+            Examples: "Qwen/Qwen2.5-0.5B-Instruct", "./my_model"
+
+    LoRA Parameters:
+        lora_rank: LoRA attention rank (default: 16).
+            Higher = more parameters, better quality, slower training.
+        lora_alpha: LoRA scaling factor (default: 16).
+            Typically set equal to lora_rank.
+        lora_dropout: Dropout for LoRA layers (default: 0.0).
+        target_modules: Modules to apply LoRA. Auto-detected if None.
+            Common: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+    Optimizer Parameters:
+        learning_rate: Learning rate for optimizer (default: 5e-6).
+            Smaller models can use higher lr (e.g., 1e-4 for 0.5B models).
+        beta: KL penalty coefficient (default: 0.001).
+            Controls policy vs reference model divergence.
+            Higher = more regularization, less exploration.
+        max_grad_norm: Gradient clipping threshold (default: 0.1).
+
+    Generation Parameters:
+        num_train_epochs: Number of training epochs (default: 3).
+        max_seq_length: Max sequence length for model (default: 2048).
+        temperature: Sampling temperature (default: 0.7).
+            Higher = more creative, lower = more deterministic.
+        top_p: Nucleus sampling threshold (default: 0.9).
+        top_k: Top-k sampling parameter (default: 50).
+        max_completion_length: Max tokens to generate (default: 1024).
+
+    Batch Parameters:
+        per_device_train_batch_size: Batch size per GPU (default: 4).
+        gradient_accumulation_steps: Steps to accumulate gradients (default: 4).
+            Effective batch = per_device_train_batch_size * gradient_accumulation_steps.
+
+    GRPO Parameters:
+        num_generations: Responses per prompt for advantage estimation (default: 4).
+            More generations = better advantage estimation, slower training.
+
+    Training Limits:
+        max_steps: Max training steps (default: 100).
+        max_token_limit: Context window size (default: 65536).
+        max_tokens_per_call: Max tokens per LLM call (default: 65536).
+
+    Runtime Parameters:
+        docker_image: Docker image for sandbox (default: "cdx123/llm-in-sandbox:v0.1").
+        output_dir: Directory for checkpoints and logs (default: "./output").
+        seed: Random seed for reproducibility (default: 42).
+
+    Early Stopping:
+        patience: Epochs to wait before early stop (default: 3).
+        min_improvement: Minimum improvement threshold (default: 0.01).
+
+    vLLM Parameters:
+        use_vllm: Use vLLM for fast inference (default: True).
+        vllm_gpu_memory_utilization: GPU memory for vLLM (default: 0.7).
+        fast_inference: Enable Unsloth fast inference (default: True).
+
+    Example:
+        >>> config = RLHFTrainingConfig(
+        ...     model_name_or_path="Qwen/Qwen2.5-0.5B-Instruct",
+        ...     num_train_epochs=3,
+        ...     max_steps=100,
+        ...     learning_rate=1e-4,
+        ... )
+        >>> results = train(config)
+    """
 
     model_name_or_path: str = "./model"
 
+    # LoRA settings
+    lora_rank: int = 16
+    lora_alpha: int = 16
+    lora_dropout: float = 0.0
+    target_modules: Optional[List[str]] = None  # Auto-detect if None
+
     # Optimizer settings
-    learning_rate: float = 1e-5
-    beta: float = 0.01  # KL penalty coefficient
-    max_grad_norm: float = 1.0
+    learning_rate: float = 5e-6
+    beta: float = 0.001  # KL penalty coefficient (Unsloth default)
+    max_grad_norm: float = 0.1
 
     # Generation settings
     num_train_epochs: int = 3
     max_seq_length: int = 2048
     temperature: float = 0.7
     top_p: float = 0.9
+    top_k: int = 50
+    max_completion_length: int = 1024
 
     # Batch settings
     per_device_train_batch_size: int = 4
     gradient_accumulation_steps: int = 4
+
+    # GRPO-specific
+    num_generations: int = 4  # Generations per prompt for GRPO group-relative advantage
 
     # Training limits
     max_steps: int = 100
@@ -83,6 +168,11 @@ class RLHFTrainingConfig:
     patience: int = 3
     min_improvement: float = 0.01
 
+    # vLLM settings
+    use_vllm: bool = True  # Use vLLM for fast generation during RL
+    vllm_gpu_memory_utilization: float = 0.7
+    fast_inference: bool = True  # Enable vLLM fast inference
+
     def __repr__(self) -> str:
         """Show training configuration."""
         return (
@@ -90,16 +180,44 @@ class RLHFTrainingConfig:
             f"model={self.model_name_or_path}, "
             f"lr={self.learning_rate}, "
             f"beta={self.beta}, "
+            f"lora_rank={self.lora_rank}, "
             f"batch={self.per_device_train_batch_size}, "
+            f"num_generations={self.num_generations}, "
             f"steps={self.max_steps})"
         )
 
 
 class ProductManager:
-    """Generates tasks/problems for training.
+    """Manages task prompts for GRPO training.
 
-    This class manages task prompts for GRPO training. Users can provide
-    their own prompts via the constructor or add them dynamically.
+    This class generates and manages task prompts that are used to generate
+    completions for GRPO training. Each prompt represents a task the model
+    should learn to complete (e.g., "Write a test for login functionality").
+
+    The class supports:
+    - Custom prompts via constructor or dynamic addition
+    - Default Chinese QA prompts if none provided
+    - Conversion to HuggingFace Dataset for GRPOTrainer
+
+    Attributes:
+        task_templates: List of user-provided prompt templates.
+            If empty, uses _default_templates.
+        num_generated: Counter for generate_task() calls.
+
+    Example:
+        >>> # Method 1: Pass prompts in constructor
+        >>> pm = ProductManager(task_templates=[
+        ...     "Write a function to sort a list",
+        ...     "Implement binary search",
+        ... ])
+        >>>
+        >>> # Method 2: Add prompts dynamically
+        >>> pm = ProductManager()
+        >>> pm.add_task_template("Your custom prompt here")
+        >>>
+        >>> # Generate a random task
+        >>> task = pm.generate_task()
+        >>> messages = pm.format_prompt(task)
 
     Usage - Provide custom prompts:
         from grpo_in_sandbox import ProductManager
@@ -131,6 +249,7 @@ class ProductManager:
         """
         self.task_templates: List[str] = task_templates if task_templates is not None else []
         self.num_generated = 0
+        self._custom_system_prompt: Optional[str] = None
         self._default_templates: List[str] = [
             "作为QA工程师，请测试以下功能：用户登录系统，包括正常登录、密码错误、账户锁定等场景。",
             "请进行回归测试：订单创建功能，验证库存扣减、支付流程、订单状态流转。",
@@ -142,74 +261,38 @@ class ProductManager:
         ]
 
     def add_task_template(self, template: str) -> None:
-        """Add a custom task prompt template.
-
-        Args:
-            template: Prompt text to add to the template list.
-        """
+        """Add a custom task prompt template."""
         self.task_templates.append(template)
 
     def add_task_templates(self, templates: List[str]) -> None:
-        """Add multiple custom task prompt templates.
-
-        Args:
-            templates: List of prompt texts to add.
-        """
+        """Add multiple custom task prompt templates."""
         self.task_templates.extend(templates)
 
     @classmethod
     def from_file(cls, file_path: str) -> "ProductManager":
-        """Create ProductManager from a file containing prompts.
-
-        Args:
-            file_path: Path to a text file with one prompt per line.
-
-        Returns:
-            ProductManager instance with prompts loaded.
-
-        Usage:
-            pm = ProductManager.from_file("/path/to/prompts.txt")
-        """
+        """Create ProductManager from a file containing prompts."""
         with open(file_path, "r", encoding="utf-8") as f:
             templates = [line.strip() for line in f if line.strip()]
         return cls(task_templates=templates)
 
     def generate_task(self) -> str:
-        """Generate a random task prompt.
-
-        Returns:
-            A task prompt string. If user provided templates exist, use those.
-            Otherwise, uses default Chinese QA templates.
-        """
+        """Generate a random task prompt."""
         self.num_generated += 1
         templates = self.task_templates if self.task_templates else self._default_templates
         return random.choice(templates)
 
     def format_prompt(self, task: str, system_prompt: Optional[str] = None) -> List[Dict[str, str]]:
-        """Format task as chat messages.
-
-        Args:
-            task: The task/prompt text.
-            system_prompt: Optional custom system prompt. If not provided, uses default.
-
-        Returns:
-            List of message dicts in chat template format.
-        """
+        """Format task as chat messages."""
         default_system = "你是一个专业的QA工程师，负责执行测试任务。"
-        if(system_prompt):
-            logging.basicConfig(level=logging.WARING)
-            logging.WARN("Not Using custom system prompt. Make sure it is appropriate for the task.")            
+        # Priority: parameter > _custom_system_prompt > default
+        effective_system = system_prompt or self._custom_system_prompt or default_system
         return [
-            {"role": "system", "content": system_prompt or default_system},
+            {"role": "system", "content": effective_system},
             {"role": "user", "content": f"任务：{task}"},
         ]
 
     def set_system_prompt(self, system_prompt: str) -> None:
-        """Set a custom system prompt.
-
-        Args:
-            system_prompt: Custom system prompt text.
-        """
+        """Set a custom system prompt."""
         self._custom_system_prompt = system_prompt
 
     @property
@@ -221,9 +304,494 @@ class ProductManager:
         """Return number of user-provided templates."""
         return len(self.task_templates)
 
+    def to_hf_dataset(self):
+        """Convert to HuggingFace dataset for GRPOTrainer.
 
+        Returns:
+            Dataset with 'prompt' and 'question' fields.
+        """
+        try:
+            from datasets import Dataset
+        except ImportError:
+            raise ImportError("datasets library required. Install with: pip install datasets")
+
+        templates = self.task_templates if self.task_templates else self._default_templates
+        # Use from_list to create dataset from list of prompts (each prompt is a row)
+        return Dataset.from_list([{"prompt": t} for t in templates])
+
+
+class RewardModel:
+    """Scores agent outputs for GRPO reward calculation.
+
+    This reward model evaluates model completions and returns a score between 0 and 1.
+    It uses two scoring methods:
+
+    1. Keyword-based scoring (always active):
+       - Checks for task-relevant keywords in response
+       - rewards structure (numbered lists, steps)
+       - rewards response length (indicates effort)
+
+    2. Sandbox execution (if runtime provided):
+       - Extracts test code from response
+       - Executes tests in sandbox
+       - Rewards passing tests with higher score
+
+    Score weighting:
+       - Base score (keyword): 60%
+       - Sandbox score: 40%
+       - Final score capped at 1.0
+
+    Attributes:
+        runtime: Optional sandbox runtime for executing test code.
+            If None, only keyword-based scoring is used.
+
+    Example:
+        >>> from grpo_in_sandbox import RewardModel
+        >>>
+        >>> # Without sandbox (keyword only)
+        >>> rm = RewardModel()
+        >>> score = rm.score("Write tests for login", "1. Test normal login\\n2. Test wrong password")
+        >>>
+        >>> # With sandbox execution
+        >>> rm = RewardModel(runtime=docker_runtime)
+        >>> score = rm.score("Write tests", "def test_login(): ...")
+
+
+    Args:
+        runtime: Optional BaseRuntime instance for sandbox execution.
+            Types: DockerRuntime, KaggleRuntime, LocalRuntime.
+    """
+
+    def __init__(self, runtime: Any = None):
+        self.runtime = runtime
+
+    def score(self, task: str, qa_output: str, trajectory: Any = None) -> float:
+        """Score the agent output."""
+        base_score = self._keyword_based_score(task, qa_output)
+        if self.runtime is not None:
+            sandbox_score = self._sandbox_score(qa_output)
+            return min(0.6 * base_score + 0.4 * sandbox_score, 1.0)
+        return base_score
+
+    def _keyword_based_score(self, task: str, response: str) -> float:
+        score = 0.0
+        response_lower = response.lower()
+        task_lower = task.lower()
+        if "测试" in task_lower or "test" in task_lower:
+            test_keywords = ["测试", "验证", "检查", "用例", "场景", "步骤", "test case"]
+            score += min(sum(1 for kw in test_keywords if kw in response_lower) * 2, 20)
+        if "登录" in task_lower:
+            if any(kw in response_lower for kw in ["正常登录", "密码错误", "username", "password"]):
+                score += 15
+        if "回归" in task_lower:
+            if any(kw in response_lower for kw in ["订单", "库存", "支付", "状态"]):
+                score += 15
+        if "API" in task_lower:
+            if any(kw in response_lower for kw in ["POST", "GET", "PUT", "DELETE", "接口", "endpoint"]):
+                score += 15
+        if len(response) > 100:
+            score += 10
+        if len(response) > 300:
+            score += 10
+        structure_keywords = ["1.", "2.", "3.", "第一", "第二", "-", "•", "步骤"]
+        if any(kw in response for kw in structure_keywords):
+            score += 10
+        return min(score, 100.0) / 100.0
+
+    def _sandbox_score(self, qa_output: str) -> float:
+        try:
+            if self.runtime is None:
+                return 0.5
+            if "def test_" not in qa_output and "import unittest" not in qa_output:
+                return 0.5
+            test_code = self._extract_test_code(qa_output)
+            if not test_code:
+                return 0.5
+            
+            # Use tempfile to avoid file path conflicts in parallel execution
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
+                test_file = f.name
+                f.write(test_code)
+            
+            try:
+                output, exit_code = self.runtime.run(f"python -m pytest {test_file} -v 2>&1 | head -50")
+                if exit_code == 0:
+                    return 1.0
+                elif "error" in output.lower() or "fail" in output.lower():
+                    return 0.3
+                return 0.6
+            finally:
+                # Clean up temp file
+                try:
+                    import os
+                    os.unlink(test_file)
+                except OSError:
+                    pass
+        except Exception:
+            return 0.5
+
+    def _extract_test_code(self, qa_output: str) -> str:
+        lines = qa_output.split("\n")
+        import_lines = []
+        test_lines = []
+        in_test = False
+        
+        # First pass: collect import lines
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("import ") or stripped.startswith("from "):
+                import_lines.append(line)
+        
+        # Second pass: collect test functions/classes
+        for line in lines:
+            if "def test_" in line or "class Test" in line:
+                in_test = True
+            if in_test:
+                test_lines.append(line)
+        
+        if test_lines:
+            # Build code with imports first, then test code
+            code_parts = []
+            if import_lines:
+                code_parts.extend(import_lines)
+            code_parts.append("import unittest")
+            code_parts.extend(test_lines)
+            code = "\n".join(code_parts)
+            if "unittest.main" not in code:
+                code += "\n\nif __name__ == '__main__':\n    unittest.main()"
+            return code
+        return ""
+
+    def close(self):
+        if self.runtime:
+            self.runtime.close()
+
+
+class GRPOSandboxRewardFunc:
+    """Reward function wrapper for GRPOTrainer that executes in sandbox.
+
+    This wraps the RewardModel to match the GRPOTrainer reward_funcs interface:
+    reward_funcs(completions: List[str], prompts: List[str]) -> List[float]
+    """
+
+    def __init__(self, reward_model: RewardModel, task_prefix: str = "任务："):
+        self.reward_model = reward_model
+        self.task_prefix = task_prefix
+
+    def __call__(self, completions: List[str], prompts: List[str]) -> List[float]:
+        """Compute rewards for completions.
+
+        Args:
+            completions: List of model-generated responses
+            prompts: List of prompt strings (original tasks)
+
+        Returns:
+            List of reward scores (float between 0 and 1)
+        """
+        rewards = []
+        for completion, prompt in zip(completions, prompts):
+            # Extract task from prompt (remove task_prefix if present)
+            task = prompt
+            if self.task_prefix in prompt:
+                task = prompt.split(self.task_prefix)[-1].strip()
+            reward = self.reward_model.score(task, completion)
+            rewards.append(reward)
+        return rewards
+
+
+class CodeExecutor:
+    """Executes code in local environment."""
+
+    def __init__(self, working_dir: str = "/tmp/testbed"):
+        self.working_dir = working_dir
+        os.makedirs(working_dir, exist_ok=True)
+
+    def run(self, code: str, timeout: int = 30) -> Tuple[str, int]:
+        import subprocess
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
+            f.write(code)
+            temp_path = f.name
+        try:
+            result = subprocess.run(['python', temp_path], capture_output=True, text=True, timeout=timeout)
+            return result.stdout + result.stderr, result.returncode
+        except subprocess.TimeoutExpired:
+            return f"Execution timed out ({timeout}s)", -1
+        except Exception as e:
+            return f"Error: {repr(e)}", -1
+        finally:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+
+def _create_reward_func_from_rm(
+    reward_model: RewardModel,
+) -> Callable[[List[str], List[str]], List[float]]:
+    """Create a reward function compatible with GRPOTrainer from a RewardModel instance."""
+
+    def reward_func(completions: List[str], prompts: List[str]) -> List[float]:
+        rewards = []
+        for completion, prompt in zip(completions, prompts):
+            task = prompt.strip()
+            reward = reward_model.score(task, completion)
+            rewards.append(reward)
+        return rewards
+
+    return reward_func
+
+
+def _load_model_and_tokenizer(config: RLHFTrainingConfig):
+    """Load model and tokenizer with Unsloth optimizations.
+
+    Uses FastLanguageModel for efficient loading and optionally enables
+    vLLM fast inference for accelerated generation during RL training.
+    """
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    log = _setup_logger(__name__)
+
+    # Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(
+        config.model_name_or_path,
+        trust_remote_code=True,
+    )
+    
+    # Ensure tokenizer has pad_token (required for training)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    # Ensure padding side is set for training
+    tokenizer.padding_side = "left"
+
+    # Load model with Unsloth
+    model_kwargs = {
+        "model": config.model_name_or_path,
+        "max_seq_length": config.max_seq_length,
+        "load_in_4bit": True,
+        "fast_inference": config.fast_inference,
+    }
+
+    # Only add gpu_memory_utilization if using fast_inference (vLLM)
+    if config.fast_inference:
+        model_kwargs["gpu_memory_utilization"] = config.vllm_gpu_memory_utilization
+
+    model, _ = FastLanguageModel.from_pretrained(**model_kwargs)
+
+    # Apply LoRA PEFT adapter
+    lora_kwargs = {
+        "model": model,
+        "r": config.lora_rank,
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "use_gradient_checkpointing": "unsloth",  # Unsloth's long-context fine-tuning
+        "random_state": config.seed,
+    }
+
+    if config.target_modules:
+        lora_kwargs["target_modules"] = config.target_modules
+    else:
+        # Auto-detect target modules (common for most models)
+        lora_kwargs["target_modules"] = [
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ]
+
+    model = FastLanguageModel.get_peft_model(**lora_kwargs)
+    model = model.to(device)
+
+    log.info(f"Model loaded with LoRA (rank={config.lora_rank}) on {device}")
+    if config.fast_inference:
+        log.info("vLLM fast inference enabled")
+
+    return model, tokenizer, device
+
+
+def _create_grpo_config(config: RLHFTrainingConfig):
+    """Create TRL GRPOConfig from RLHFTrainingConfig."""
+    try:
+        from trl import GRPOConfig
+    except ImportError:
+        raise ImportError("trl library required. Install with: pip install trl")
+
+    max_prompt_length = config.max_seq_length // 2
+    max_completion_length = config.max_seq_length - max_prompt_length
+
+    grpo_config = GRPOConfig(
+        # Output
+        output_dir=config.output_dir,
+        seed=config.seed,
+
+        # Optimization
+        learning_rate=config.learning_rate,
+        beta=config.beta,
+        max_grad_norm=config.max_grad_norm,
+        gradient_accumulation_steps=config.gradient_accumulation_steps,
+
+        # Generation
+        temperature=config.temperature,
+        top_p=config.top_p,
+        top_k=config.top_k,
+        max_completion_length=config.max_completion_length or max_completion_length,
+        num_generations=config.num_generations,
+
+        # Batch
+        per_device_train_batch_size=config.per_device_train_batch_size,
+
+        # Training limits
+        max_steps=config.max_steps,
+        num_train_epochs=config.num_train_epochs,
+
+        # vLLM
+        use_vllm=config.use_vllm,
+        vllm_mode="colocate" if config.use_vllm else None,
+        vllm_gpu_memory_utilization=config.vllm_gpu_memory_utilization,
+
+        # Logging
+        logging_steps=1,
+        log_completions=True,
+
+        # Save
+        save_steps=config.max_steps // 10 or 10,
+
+        # Misc
+        report_to="none",
+    )
+
+    return grpo_config
+
+
+def train(
+    config: RLHFTrainingConfig,
+    product_manager: Optional[ProductManager] = None,
+    reward_model: Optional[RewardModel] = None,
+) -> Dict[str, Any]:
+    """Run GRPO training using Unsloth's optimized GRPOTrainer.
+
+    This function uses TRL's GRPOTrainer with Unsloth's PatchFastRL optimizations
+    for accelerated RL training with vLLM inference.
+
+    Args:
+        config: RLHFTrainingConfig with model and training parameters
+        product_manager: Optional ProductManager for custom task prompts
+        reward_model: Optional RewardModel for sandbox-based reward scoring
+
+    Returns:
+        Dict with training metrics and results
+    """
+    log = _setup_logger(__name__)
+
+    # Log training configuration
+
+
+    random.seed(config.seed)
+    os.makedirs(config.output_dir, exist_ok=True)
+
+    # Step 1: Patch TRL for Unsloth GRPO optimizations
+    log.info("Applying Unsloth optimizations to TRL...")
+    try:
+        from unsloth import FastLanguageModel, PatchFastRL
+        PatchFastRL(algorithm="grpo", FastLanguageModel=FastLanguageModel)
+        log.info("Unsloth PatchFastRL applied successfully")
+    except ImportError as e:
+        log.warning(f"Could not apply PatchFastRL: {e}. Continuing with base Unsloth.")
+
+    # Step 2: Load model and tokenizer with LoRA
+    model, tokenizer, device = _load_model_and_tokenizer(config)
+    log.info(f"Model loaded on device: {device}")
+
+    # Step 3: Prepare dataset for GRPOTrainer
+    pm = product_manager or ProductManager()
+    rm = reward_model or RewardModel()
+
+    try:
+        from datasets import Dataset
+    except ImportError:
+        raise ImportError("datasets library required. Install with: pip install datasets")
+
+    templates = pm.task_templates if pm.task_templates else pm._default_templates
+    # GRPOTrainer needs 'prompt' field
+    dataset = Dataset.from_dict({"prompt": templates})
+
+    # For GRPOTrainer, we need to duplicate prompts for num_generations
+    # The trainer handles generating multiple completions per prompt
+    all_prompts = []
+    for _ in range(config.num_generations):
+        all_prompts.extend(templates)
+    dataset = Dataset.from_dict({"prompt": all_prompts})
+
+    log.info(f"Dataset prepared: {len(dataset)} samples ({config.num_generations} generations x {len(templates)} prompts)")
+
+    # Step 4: Create reward function
+    reward_func = _create_reward_func_from_rm(rm)
+
+    # Step 5: Create GRPOConfig
+    grpo_config = _create_grpo_config(config)
+
+    # Step 6: Initialize GRPOTrainer
+    log.info("Initializing GRPOTrainer...")
+    try:
+        from trl import GRPOTrainer
+    except ImportError:
+        raise ImportError("trl library required. Install with: pip install trl")
+
+    trainer = GRPOTrainer(
+        model=model,
+        processing_class=tokenizer,
+        args=grpo_config,
+        train_dataset=dataset,
+        reward_funcs=reward_func,
+    )
+
+    # Step 7: Prepare model for training
+    model = model.for_training()
+    log.info("Model prepared for training (for_training mode)")
+
+    # Step 8: Train!
+    log.info("Starting GRPO training...")
+    try:
+        trainer.train()
+    except Exception as e:
+        log.error(f"Training error: {e}")
+        raise
+
+    # Step 9: Save model
+    final_checkpoint = os.path.join(config.output_dir, "final_model")
+    log.info(f"Saving final model to {final_checkpoint}")
+    trainer.save_model(final_checkpoint)
+    tokenizer.save_pretrained(final_checkpoint)
+
+    # Step 10: Return results
+    log.info("=" * 60)
+    log.info("Training Complete")
+    log.info("=" * 60)
+
+    results = {
+        "config": {
+            "model_name_or_path": config.model_name_or_path,
+            "lora_rank": config.lora_rank,
+            "learning_rate": config.learning_rate,
+            "beta": config.beta,
+            "num_train_epochs": config.num_train_epochs,
+            "max_steps": config.max_steps,
+        },
+        "output_dir": config.output_dir,
+        "final_checkpoint": final_checkpoint,
+    }
+
+    # Save results
+    results_path = os.path.join(config.output_dir, "training_results.json")
+    with open(results_path, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+    log.info(f"Results saved to {results_path}")
+
+    return results
+
+
+# Keep legacy classes for backward compatibility
 class ReferenceModel:
-    """Reference model for KL divergence constraint."""
+    """Reference model for KL divergence constraint (kept for compatibility)."""
 
     def __init__(self, model, tokenizer):
         import torch
@@ -236,11 +804,7 @@ class ReferenceModel:
             self.reference_params[name] = param.data.clone()
 
     def compute_kl_divergence(self, input_ids, attention_mask):
-        """Compute KL divergence between policy and reference model.
-
-        Returns:
-            KL divergence as a tensor (for loss computation) and also logs the float value.
-        """
+        """Compute KL divergence between policy and reference model."""
         torch = self.torch
         with torch.no_grad():
             ref_logits = self.model(input_ids=input_ids, attention_mask=attention_mask).logits
@@ -248,7 +812,6 @@ class ReferenceModel:
         ref_log_probs = torch.nn.functional.log_softmax(ref_logits, dim=-1)
         policy_probs = torch.nn.functional.softmax(policy_logits, dim=-1)
         kl = torch.nn.functional.kl_div(ref_log_probs, policy_probs, reduction='batchmean', log_target=True)
-        # Store float value for logging before returning tensor
         self._last_kl_float = kl.item()
         return kl
 
@@ -260,7 +823,7 @@ class ReferenceModel:
 
 
 class ReplayBuffer:
-    """Experience replay buffer for storing trajectories."""
+    """Experience replay buffer (kept for compatibility)."""
 
     def __init__(self, max_size: int = 10000):
         self.max_size = max_size
@@ -303,114 +866,12 @@ class ReplayBuffer:
         return len(self.buffer)
 
 
-class CodeExecutor:
-    """Executes code in local environment."""
-
-    def __init__(self, working_dir: str = "/tmp/testbed"):
-        self.working_dir = working_dir
-        os.makedirs(working_dir, exist_ok=True)
-
-    def run(self, code: str, timeout: int = 30) -> Tuple[str, int]:
-        import subprocess
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
-            f.write(code)
-            temp_path = f.name
-        try:
-            result = subprocess.run(['python', temp_path], capture_output=True, text=True, timeout=timeout)
-            return result.stdout + result.stderr, result.returncode
-        except subprocess.TimeoutExpired:
-            return f"Execution timed out ({timeout}s)", -1
-        except Exception as e:
-            return f"Error: {repr(e)}", -1
-        finally:
-            try:
-                os.unlink(temp_path)
-            except:
-                pass
-
-
-class RewardModel:
-    """Reward model for evaluating agent outputs."""
-
-    def __init__(self, runtime: Any = None):
-        self.runtime = runtime
-
-    def score(self, task: str, qa_output: str, trajectory: Any = None) -> float:
-        """Score the agent output."""
-        base_score = self._keyword_based_score(task, qa_output)
-        if self.runtime is not None:
-            sandbox_score = self._sandbox_score(qa_output)
-            return min(0.6 * base_score + 0.4 * sandbox_score, 1.0)
-        return base_score
-
-    def _keyword_based_score(self, task: str, response: str) -> float:
-        score = 0.0
-        response_lower = response.lower()
-        task_lower = task.lower()
-        if "测试" in task_lower or "test" in task_lower:
-            test_keywords = ["测试", "验证", "检查", "用例", "场景", "步骤", "test case"]
-            score += min(sum(1 for kw in test_keywords if kw in response_lower) * 2, 20)
-        if "登录" in task_lower:
-            if any(kw in response_lower for kw in ["正常登录", "密码错误", "username", "password"]):
-                score += 15
-        if "回归" in task_lower:
-            if any(kw in response_lower for kw in ["订单", "库存", "支付", "状态"]):
-                score += 15
-        if "API" in task_lower:
-            if any(kw in response_lower for kw in ["POST", "GET", "PUT", "DELETE", "接口", "endpoint"]):
-                score += 15
-        if len(response) > 100:
-            score += 10
-        if len(response) > 300:
-            score += 10
-        structure_keywords = ["1.", "2.", "3.", "第一", "第二", "-", "•", "步骤"]
-        if any(kw in response for kw in structure_keywords):
-            score += 10
-        return min(score, 100.0) / 100.0
-
-    def _sandbox_score(self, qa_output: str) -> float:
-        try:
-            if "def test_" not in qa_output and "import unittest" not in qa_output:
-                return 0.5
-            test_code = self._extract_test_code(qa_output)
-            if not test_code:
-                return 0.5
-            test_file = "/tmp/verify_test.py"
-            with open(test_file, "w", encoding="utf-8") as f:
-                f.write(test_code)
-            output, exit_code = self.runtime.run(f"python -m pytest {test_file} -v 2>&1 | head -50")
-            if exit_code == 0:
-                return 1.0
-            elif "error" in output.lower() or "fail" in output.lower():
-                return 0.3
-            return 0.6
-        except:
-            return 0.5
-
-    def _extract_test_code(self, qa_output: str) -> str:
-        lines = qa_output.split("\n")
-        in_test = False
-        test_lines = []
-        for line in lines:
-            if "def test_" in line or "class Test" in line:
-                in_test = True
-            if in_test:
-                test_lines.append(line)
-        if test_lines:
-            code = "import unittest\n" + "\n".join(test_lines)
-            if "unittest.main" not in code:
-                code += "\n\nif __name__ == '__main__':\n    unittest.main()"
-            return code
-        return ""
-
-    def close(self):
-        if self.runtime:
-            self.runtime.close()
-
-
 class GRPOOptimizer:
-    """GRPO (Group Relative Policy Optimization) Optimizer."""
+    """GRPO Optimizer (legacy, kept for backward compatibility).
+
+    Note: New code should use train() with GRPOTrainer for Unsloth-optimized
+    GRPO training with vLLM acceleration and proper reference model support.
+    """
 
     def __init__(self, model, tokenizer, beta: float = 0.01, lr: float = 1e-5, max_grad_norm: float = 1.0):
         import torch
@@ -425,11 +886,7 @@ class GRPOOptimizer:
         self.reference_model = ReferenceModel(model, tokenizer)
 
     def compute_grpo_loss(self, input_ids, attention_mask, response_ids, advantages: List[float]):
-        """Compute GRPO loss.
-
-        Returns:
-            Tuple of (total_loss tensor, metrics dict)
-        """
+        """Compute GRPO loss."""
         torch = self.torch
         F = torch.nn.functional
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=response_ids)
@@ -442,13 +899,16 @@ class GRPOOptimizer:
         policy_log_probs = (selected_log_probs * response_mask).sum(dim=-1) / (response_mask.sum(dim=-1) + 1e-8)
         advantages_tensor = torch.tensor(advantages, device=self.device)
         grpo_loss = -(policy_log_probs * advantages_tensor).mean()
-        # KL as tensor for gradient (beta is a float, multiplication works via broadcasting)
         kl_div = self.reference_model.compute_kl_divergence(input_ids, attention_mask)
         kl_penalty = self.beta * kl_div
         total_loss = grpo_loss + kl_penalty
-        # Get float values for logging
         kl_float = getattr(self.reference_model, '_last_kl_float', 0.0)
-        metrics = {"grpo_loss": grpo_loss.item(), "kl_div": kl_float, "kl_penalty": kl_penalty.item() if hasattr(kl_penalty, 'item') else kl_penalty, "total_loss": total_loss.item()}
+        metrics = {
+            "grpo_loss": grpo_loss.item(),
+            "kl_div": kl_float,
+            "kl_penalty": kl_penalty.item() if hasattr(kl_penalty, 'item') else kl_penalty,
+            "total_loss": total_loss.item()
+        }
         return total_loss, metrics
 
     def step(self, input_ids, attention_mask, response_ids, advantages: List[float]) -> Dict[str, float]:
@@ -461,144 +921,3 @@ class GRPOOptimizer:
         self.scheduler.step()
         self.reference_model.reset()
         return metrics
-
-
-def _load_model_and_tokenizer(config: RLHFTrainingConfig):
-    """Load model and tokenizer."""
-    try:
-        import torch
-        from transformers import AutoTokenizer
-        from unsloth import FastLanguageModel
-    except ImportError as e:
-        raise ImportError(f"Missing dependency: {e}")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path, trust_remote_code=True)
-    model, _ = FastLanguageModel.from_pretrained(model_name=config.model_name_or_path, max_seq_length=config.max_seq_length, load_in_4bit=False)
-    model = model.to(device)
-    return model, tokenizer, device
-
-
-def train(config: RLHFTrainingConfig, product_manager: Optional[ProductManager] = None, reward_model: Optional[RewardModel] = None) -> Dict[str, Any]:
-    """Run full GRPO training loop in sandbox environment."""
-    log = _setup_logger(__name__)
-    
-    # Log training configuration
-    log.info("=" * 50)
-    log.info("GRPO Training Configuration:")
-    log.info(f"  Model: {config.model_name_or_path}")
-    log.info(f"  Learning rate: {config.learning_rate}")
-    log.info(f"  KL beta: {config.beta}")
-    log.info(f"  Max grad norm: {config.max_grad_norm}")
-    log.info(f"  Batch size: {config.per_device_train_batch_size}")
-    log.info(f"  Gradient accumulation: {config.gradient_accumulation_steps}")
-    log.info(f"  Max steps: {config.max_steps}")
-    log.info(f"  Max seq length: {config.max_seq_length}")
-    log.info(f"  Temperature: {config.temperature}")
-    log.info(f"  Top p: {config.top_p}")
-    log.info(f"  Output dir: {config.output_dir}")
-    log.info(f"  Seed: {config.seed}")
-    log.info("=" * 50)
-    
-    random.seed(config.seed)
-    model, tokenizer, device = _load_model_and_tokenizer(config)
-    log.info(f"Model loaded on device: {device}")
-    grpo_optimizer = GRPOOptimizer(model=model, tokenizer=tokenizer, beta=config.beta, lr=config.learning_rate, max_grad_norm=config.max_grad_norm)
-    pm = product_manager or ProductManager()
-    rm = reward_model or RewardModel()
-    replay_buffer = ReplayBuffer(max_size=config.max_steps)
-    training_metrics = {"rewards": [], "kl_divs": [], "losses": []}
-    best_reward = 0.0
-    patience_counter = 0
-    os.makedirs(config.output_dir, exist_ok=True)
-    log.info(f"Output directory created: {config.output_dir}")
-    log.info("Starting training loop...")
-    try:
-        import torch
-        for step in range(config.max_steps):
-            log.info(f"--- Step {step + 1}/{config.max_steps} ---")
-            task = pm.generate_task()
-            log.debug(f"Generated task: {task[:50]}...")
-            messages = pm.format_prompt(task)
-            text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=config.max_seq_length).to(device)
-            input_ids = inputs['input_ids']
-            attention_mask = inputs.get('attention_mask', torch.ones_like(input_ids))
-            num_samples = config.per_device_train_batch_size
-            all_responses = []
-            all_rewards = []
-            for sample_idx in range(num_samples):
-                with torch.no_grad():
-                    outputs = model.generate(input_ids=input_ids, max_new_tokens=512, temperature=config.temperature, do_sample=True, top_p=config.top_p, pad_token_id=tokenizer.pad_token_id)
-                response_ids = outputs[0][input_ids.shape[1]:]
-                response = tokenizer.decode(response_ids, skip_special_tokens=True)
-                all_responses.append(response_ids)
-                reward = rm.score(task, response)
-                all_rewards.append(reward)
-            mean_reward = sum(all_rewards) / len(all_rewards)
-            advantages = [r - mean_reward for r in all_rewards]
-            mean_adv = sum(advantages) / len(advantages)
-            std_adv = (sum((a - mean_adv) ** 2 for a in advantages) / len(advantages)) ** 0.5
-            if std_adv > 1e-8:
-                advantages = [(a - mean_adv) / std_adv for a in advantages]
-            log.info(f"  Reward: {mean_reward:.4f}, Adv mean: {mean_adv:.4f}")
-            trajectory = {"task": task, "input_ids": input_ids, "attention_mask": attention_mask, "responses": all_responses}
-            replay_buffer.add(trajectory, mean_reward)
-            training_metrics["rewards"].append(mean_reward)
-            if (step + 1) % config.gradient_accumulation_steps == 0 and len(replay_buffer) >= config.per_device_train_batch_size:
-                batch_size = min(config.per_device_train_batch_size, len(replay_buffer))
-                batch = replay_buffer.sample(batch_size)
-                batch_input_ids = torch.cat([t['input_ids'] for t in batch])
-                batch_attention_mask = torch.cat([t['attention_mask'] for t in batch])
-                batch_responses = torch.cat([t['responses'][0] if t['responses'] else t['input_ids'] for t in batch]).to(device)
-                batch_rewards = list(replay_buffer.advantages[-batch_size:])
-                batch_baseline = sum(batch_rewards) / len(batch_rewards)
-                batch_advantages = [r - batch_baseline for r in batch_rewards]
-                if batch_advantages:
-                    mean_a = sum(batch_advantages) / len(batch_advantages)
-                    std_a = (sum((a - mean_a) ** 2 for a in batch_advantages) / len(batch_advantages)) ** 0.5
-                    if std_a > 1e-8:
-                        batch_advantages = [(a - mean_a) / std_a for a in batch_advantages]
-                try:
-                    metrics = grpo_optimizer.step(batch_input_ids, batch_attention_mask, batch_responses, batch_advantages)
-                    training_metrics["kl_divs"].append(metrics['kl_div'])
-                    training_metrics["losses"].append(metrics['total_loss'])
-                    print(f"  Loss: {metrics['total_loss']:.4f}, KL: {metrics['kl_div']:.4f}")
-                except Exception as e:
-                    print(f"  Optimization error: {e}")
-            if mean_reward > best_reward + config.min_improvement:
-                best_reward = mean_reward
-                patience_counter = 0
-                checkpoint_path = os.path.join(config.output_dir, "best_model")
-                print(f"  Saving checkpoint to {checkpoint_path}")
-                model.save_pretrained(checkpoint_path)
-                tokenizer.save_pretrained(checkpoint_path)
-            else:
-                patience_counter += 1
-            if patience_counter >= config.patience:
-                print(f"\nEarly stopping: no improvement for {config.patience} steps")
-                break
-    finally:
-        avg_reward = sum(training_metrics["rewards"]) / len(training_metrics["rewards"]) if training_metrics["rewards"] else 0.0
-        avg_kl = sum(training_metrics["kl_divs"]) / len(training_metrics["kl_divs"]) if training_metrics["kl_divs"] else 0.0
-        avg_loss = sum(training_metrics["losses"]) / len(training_metrics["losses"]) if training_metrics["losses"] else 0.0
-        print(f"\n{'=' * 50}")
-        print("Training Complete")
-        print(f"{'=' * 50}")
-        print(f"Average reward: {avg_reward:.4f}")
-        print(f"Average KL div: {avg_kl:.4f}")
-        print(f"Average loss: {avg_loss:.4f}")
-        print(f"Best reward: {best_reward:.4f}")
-        results = {"config": {"model_name_or_path": config.model_name_or_path, "learning_rate": config.learning_rate, "beta": config.beta, "num_train_epochs": config.num_train_epochs, "max_steps": config.max_steps}, "metrics": {"avg_reward": avg_reward, "avg_kl_div": avg_kl, "avg_loss": avg_loss, "best_reward": best_reward}, "training_history": training_metrics}
-        results_path = os.path.join(config.output_dir, "training_results.json")
-        with open(results_path, "w", encoding="utf-8") as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
-        print(f"Results saved: {results_path}")
-        final_path = os.path.join(config.output_dir, "final_model")
-        model.save_pretrained(final_path)
-        tokenizer.save_pretrained(final_path)
-        print(f"Final model saved: {final_path}")
-        rm.close()
-    return results
-
-
-__all__ = ["RLHFTrainingConfig", "ProductManager", "RewardModel", "ReferenceModel", "ReplayBuffer", "GRPOOptimizer", "train"]
