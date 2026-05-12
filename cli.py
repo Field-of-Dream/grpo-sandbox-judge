@@ -12,31 +12,28 @@
     llm-in-sandbox run --query "Your task" --llm_name gpt-4
     llm-in-sandbox benchmark --task math --llm_name gpt-4
 """
-import os
-import sys
-import json
-import yaml
-import logging
 import datetime
-import warnings
+import json
+import os
 import subprocess
-from pathlib import Path
-from typing import Optional
+import sys
+import warnings
 from importlib import resources
-
-# 抑制来自litellm的pydantic序列化警告
-warnings.filterwarnings("ignore", message="Pydantic serializer warnings")
+from pathlib import Path
 
 import docker
 import fire
+import yaml
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
-from rich.markup import escape
 
-from docker_runtime import DockerRuntime
 from agent import Agent, AgentArgs, get_logger
-from trajectory import Trajectory
+from docker_runtime import DockerRuntime
+
+# 抑制来自litellm的pydantic序列化警告
+warnings.filterwarnings("ignore", message="Pydantic serializer warnings")
 
 # Rich控制台
 console = Console()
@@ -71,7 +68,7 @@ def get_default_config_path() -> Path:
         return Path(__file__).parent / "config" / "general.yaml"
 
 
-def load_runtime_settings(explicit_path: Optional[str] = None):
+def load_runtime_settings(explicit_path: str | None = None):
     """
     从YAML配置文件加载CLI默认值（llm_name/llm_base_url等）。
 
@@ -100,14 +97,14 @@ def load_runtime_settings(explicit_path: Optional[str] = None):
 
     for candidate in candidates:
         if candidate.is_file():
-            with open(candidate, "r") as f:
+            with open(candidate) as f:
                 data = yaml.safe_load(f) or {}
             return data, candidate
 
     return {}, None
 
 
-def find_dockerfile() -> Optional[Path]:
+def find_dockerfile() -> Path | None:
     """
     查找用于构建默认镜像的Dockerfile。
 
@@ -125,7 +122,7 @@ def find_dockerfile() -> Optional[Path]:
     installed_docker_dir = Path(sys.prefix) / "share" / "grpo-in-sandbox" / "docker"
     if (installed_docker_dir / "Dockerfile").exists():
         return installed_docker_dir / "Dockerfile"
-    
+
     return None
 
 
@@ -141,7 +138,7 @@ def ensure_docker_image(image_name: str, logger) -> bool:
         镜像是否可用
     """
     client = docker.from_env()
-    
+
     try:
         client.images.get(image_name)
         return True  # 镜像已存在
@@ -184,9 +181,9 @@ def build_docker_image(
         llm-in-sandbox build --force  # 强制重建
         llm-in-sandbox build --image_name my-custom-image:v1
     """
-    logger = get_logger("llm-in-sandbox")
+    get_logger("llm-in-sandbox")
     client = docker.from_env()
-    
+
     # 检查镜像是否已存在
     if not force:
         try:
@@ -199,7 +196,7 @@ def build_docker_image(
             return
         except docker.errors.ImageNotFound:
             pass
-    
+
     # 查找Dockerfile
     dockerfile = find_dockerfile()
     if dockerfile is None:
@@ -209,7 +206,7 @@ def build_docker_image(
             border_style="red",
         ))
         sys.exit(1)
-    
+
     # 构建镜像
     console.print()
     console.print(Panel.fit(
@@ -218,10 +215,10 @@ def build_docker_image(
         border_style="yellow",
     ))
     console.print()
-    
+
     docker_dir = dockerfile.parent
     try:
-        result = subprocess.run(
+        subprocess.run(
             ["docker", "build", "-t", image_name, "-f", str(dockerfile), str(docker_dir)],
             check=True,
         )
@@ -239,7 +236,7 @@ def build_docker_image(
         sys.exit(1)
     except FileNotFoundError:
         console.print(Panel.fit(
-            f"[red]❌ 未找到Docker。请先安装Docker。[/red]",
+            "[red]❌ 未找到Docker。请先安装Docker。[/red]",
             border_style="red",
         ))
         sys.exit(1)
@@ -255,27 +252,27 @@ def load_prompt_config(config_path: str) -> dict:
     Returns:
         配置字典
     """
-    with open(config_path, "r") as f:
+    with open(config_path) as f:
         config = yaml.safe_load(f)
     return config
 
 
 def run_agent_query(
     query: str,
-    llm_name: Optional[str] = None,
+    llm_name: str | None = None,
     docker_image: str = DEFAULT_DOCKER_IMAGE,
     max_steps: int = 100,
     temperature: float = 1.0,
     max_token_limit: int = 65536,
     max_tokens_per_call: int = 65536,
-    input_dir: Optional[str] = None,
-    output_dir: Optional[str] = None,
-    llm_base_url: Optional[str] = None,
-    api_key: Optional[str] = None,
-    prompt_config: Optional[str] = None,
+    input_dir: str | None = None,
+    output_dir: str | None = None,
+    llm_base_url: str | None = None,
+    api_key: str | None = None,
+    prompt_config: str | None = None,
     save_litellm_response: bool = False,
-    extra_body: Optional[str] = None,
-    settings: Optional[str] = None,
+    extra_body: str | None = None,
+    settings: str | None = None,
 ):
     """
     在Docker容器中运行LLM智能体完成任务。
@@ -323,7 +320,7 @@ def run_agent_query(
         raise ValueError(
             "llm_name是必需的。请提供 --llm_name 或在设置YAML文件中设置。"
         )
-    
+
     # 根据模型类型设置API密钥
     if api_key:
         os.environ["OPENAI_API_KEY"] = str(api_key)
@@ -334,7 +331,7 @@ def run_agent_query(
             os.environ["OPENAI_API_KEY"] = "dummy"
         if not os.environ.get("ANTHROPIC_API_KEY"):
             os.environ["ANTHROPIC_API_KEY"] = "dummy"
-    
+
     # 从yaml加载提示词配置（如果未提供则使用默认）
     config_path = prompt_config if prompt_config else get_default_config_path()
     if Path(config_path).exists():
@@ -351,12 +348,12 @@ def run_agent_query(
         instance_prompt = instance_prompt.replace("{input_dir}", container_input_dir).replace("{output_dir}", container_output_dir).replace("{working_dir}", working_dir)
     else:
         raise FileNotFoundError(f"未找到提示词配置：{config_path}")
-    
+
     # 为自定义LLM端点自动添加openai/前缀
     if not llm_name.startswith(("openai/", "anthropic/", "azure/", "hosted_vllm/")):
         llm_name = f"openai/{llm_name}"
         logger.info(f"自动为模型添加 'openai/' 前缀：{llm_name}")
-    
+
     # 设置带时间戳的输出目录
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     if output_dir is None:
@@ -364,11 +361,11 @@ def run_agent_query(
     else:
         output_dir = Path(output_dir) / timestamp
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # 设置LLM基础URL
     if llm_base_url:
         os.environ["LLM_BASE_URL"] = llm_base_url
-    
+
     # 确保Docker镜像存在
     if not ensure_docker_image(docker_image, logger):
         console.print(Panel.fit(
@@ -377,20 +374,20 @@ def run_agent_query(
             border_style="red",
         ))
         sys.exit(1)
-    
+
     # 初始化Docker运行时
-    logger.info(f"正在启动Docker容器...")
+    logger.info("正在启动Docker容器...")
     runtime = DockerRuntime(
         docker_image=docker_image,
         repo_path=working_dir,
         logger=logger,
     )
-    
+
     # 如果提供了input_dir，则复制输入文件到容器
     if input_dir and os.path.isdir(input_dir):
         logger.info(f"正在复制输入文件从 {input_dir} 到容器的 {container_input_dir}")
         runtime.copy_dir_to_container(input_dir, container_input_dir)
-    
+
     def _fix_string_bools(obj):
         """
         递归地将字符串'true'/'false'转换为布尔值True/False。
@@ -407,7 +404,7 @@ def run_agent_query(
             elif obj.lower() == 'false':
                 return False
         return obj
-    
+
     try:
         # 处理extra_body：可以是dict（来自fire）或JSON字符串
         extra_body_dict = None
@@ -419,11 +416,11 @@ def run_agent_query(
                     extra_body_dict = json.loads(extra_body)
                 except json.JSONDecodeError as e:
                     logger.error(f"解析extra_body JSON失败: {e}")
-                    raise ValueError(f"无效的extra_body JSON: {extra_body}")
+                    raise ValueError(f"无效的extra_body JSON: {extra_body}") from e
             # 修复字符串布尔值如'true' -> True
             extra_body_dict = _fix_string_bools(extra_body_dict)
             logger.info(f"使用extra_body: {extra_body_dict}")
-        
+
         # 初始化智能体
         agent_args = AgentArgs(
             system_prompt=system_prompt,
@@ -435,9 +432,9 @@ def run_agent_query(
             extra_body=extra_body_dict,
         )
         agent = Agent(args=agent_args, logger=logger)
-        
+
         # 运行智能体
-        logger.info(f"正在启动智能体...")
+        logger.info("正在启动智能体...")
         trajectory = agent.run(
             runtime=runtime,
             problem_statement=query,
@@ -446,7 +443,7 @@ def run_agent_query(
             max_token_limit=max_token_limit,
             max_tokens_per_call=max_tokens_per_call,
         )
-        
+
         # 将输出文件从容器复制到files/子目录
         files_dir = output_dir / "files"
         files_dir.mkdir(parents=True, exist_ok=True)
@@ -455,20 +452,20 @@ def run_agent_query(
             runtime.copy_from_container(container_output_dir, str(files_dir))
         except Exception as e:
             logger.warning(f"无法复制容器输出：{e}")
-        
+
         # 保存轨迹
         trajectory_file = output_dir / "trajectory.json"
-        
+
         with open(trajectory_file, "w") as f:
             json.dump(trajectory.to_dict(), f, indent=2, ensure_ascii=False)
-        
+
         # 打印完成横幅
         console.print()
         console.print(Panel.fit(
             f"[bold green]✅ 智能体在 {len(trajectory.steps)} 步内完成[/bold green]",
             border_style="green",
         ))
-        
+
         # 打印输出路径
         console.print()
         console.print("[bold]📦 输出保存到：[/bold]")
@@ -478,7 +475,7 @@ def run_agent_query(
         paths_table.add_row("智能体输出文件", str(files_dir))
         paths_table.add_row("执行轨迹", str(trajectory_file))
         console.print(paths_table)
-        
+
         # 如果存在answer.txt则打印
         answer_file = files_dir / "answer.txt"
         if answer_file.exists():
@@ -491,10 +488,10 @@ def run_agent_query(
                     border_style="cyan",
                     padding=(1, 2),
                 ))
-        
+
     finally:
         # 清理
-        logger.info(f"正在清理Docker容器...")
+        logger.info("正在清理Docker容器...")
         runtime.close()
 
 
@@ -553,7 +550,7 @@ def run_benchmark(
 
     logger = get_logger("grpo-in-sandbox")
     runtime_settings, _ = load_runtime_settings(settings)
-    
+
     # 解析参数：CLI参数 > 环境变量 > 配置文件 > 默认值
     llm_name = llm_name or os.environ.get("LLM_NAME") or runtime_settings.get("llm_name")
     llm_base_url = llm_base_url or os.environ.get("LLM_BASE_URL") or runtime_settings.get("llm_base_url")
@@ -562,10 +559,10 @@ def run_benchmark(
         temperature = float(os.environ.get("LLM_TEMPERATURE", "1.0"))
     if num_workers is None:
         num_workers = int(os.environ.get("LLM_NUM_WORKERS", "1"))
-    
+
     if not llm_name:
         raise ValueError("llm_name是必需的")
-    
+
     # 设置API密钥（为本地vLLM使用占位符）
     api_key = api_key or "sk-placeholder"
     os.environ["OPENAI_API_KEY"] = os.environ["ANTHROPIC_API_KEY"] = str(api_key)
@@ -573,24 +570,23 @@ def run_benchmark(
         os.environ["LLM_BASE_URL"] = llm_base_url
     if not llm_name.startswith(("openai/", "anthropic/", "azure/", "hosted_vllm/")):
         llm_name = f"openai/{llm_name}"
-    
+
     # 设置输出目录：output/{timestamp}_{task}_{llm_name}_{mode}/
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     mode_suffix = "vanillaLLM" if mode == "llm" else "LLMinSandbox"
     llm_name_safe = llm_name.replace("/", "_")  # openai/qwen3_coder -> openai_qwen3_coder
     output_dir = Path(output_dir or Path.cwd() / "output") / f"{timestamp}_{task}_{llm_name_safe}_{mode_suffix}"
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # 验证模式
     if mode not in ("llm", "llm-in-sandbox"):
         raise ValueError(f"无效的模式：{mode}。必须是'llm'或'llm-in-sandbox'")
-    
+
     # 仅在llm-in-sandbox模式下检查docker镜像
-    if mode == "llm-in-sandbox":
-        if not ensure_docker_image(docker_image, logger):
-            console.print(f"[red]未找到Docker镜像 '{docker_image}'！[/red]")
-            sys.exit(1)
-    
+    if mode == "llm-in-sandbox" and not ensure_docker_image(docker_image, logger):
+        console.print(f"[red]未找到Docker镜像 '{docker_image}'！[/red]")
+        sys.exit(1)
+
     def _fix_string_bools(obj):
         """递归地将字符串'true'/'false'转换为布尔值。"""
         if isinstance(obj, dict):
@@ -603,7 +599,7 @@ def run_benchmark(
             elif obj.lower() == 'false':
                 return False
         return obj
-    
+
     # 处理extra_body
     extra_body_dict = None
     if extra_body:
@@ -614,11 +610,11 @@ def run_benchmark(
                 extra_body_dict = json.loads(extra_body)
             except json.JSONDecodeError as e:
                 logger.error(f"解析extra_body JSON失败: {e}")
-                raise ValueError(f"无效的extra_body JSON: {extra_body}")
+                raise ValueError(f"无效的extra_body JSON: {extra_body}") from e
         # 修复字符串布尔值
         extra_body_dict = _fix_string_bools(extra_body_dict)
         logger.info(f"使用extra_body: {extra_body_dict}")
-    
+
     # 智能体配置（传递给子进程）
     agent_config = {
         "docker_image": docker_image,
@@ -632,7 +628,7 @@ def run_benchmark(
         "extra_body": extra_body_dict,
         "save_litellm_response": save_litellm_response,
     }
-    
+
     # 运行基准测试
     results = _run_benchmark(
         task_name=task,
@@ -643,7 +639,7 @@ def run_benchmark(
         end_id=end_id,
         mode=mode,
     )
-    
+
     return results
 
 

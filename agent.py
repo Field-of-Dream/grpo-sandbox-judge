@@ -1,94 +1,61 @@
 """
-Agent Module - LLM-powered autonomous agent for code execution.
-
-This module provides an Agent class that uses Large Language Models (LLMs) to:
-- Understand user requests and break them into actionable steps
-- Execute code in isolated sandbox environments (Docker/Kaggle/Local)
-- Use tools like file editor, bash command executor, and submit handler
-- Maintain conversation history and execution trajectory for RL training
-
-Key Features:
-- Multi-model support: OpenAI, Anthropic, vLLM, SGLang, local models
-- Tool calling: str_replace_editor, execute_bash, submit
-- Token management: Automatic handling of context length limits
-- Retry logic: Exponential backoff for rate limits
-- Trajectory recording: Full execution history for GRPO training
-
-Architecture:
-    User Request
-         |
-         v
-    +-----------+     +-----------+     +---------------+
-    |   LLM     | --> |  Action   | --> |   Runtime    |
-    | (model_query) |  |(_execute_)|  | (Docker/Local)|
-    +-----------+     +-----------+     +---------------+
-         |                |
-         v                v
-    +-----------+     +-----------+
-    | Trajectory|     |Observation|
-    |  Steps   |     |  Result  |
-    +-----------+     +-----------+
+Agent Module - LLM-powered autonomous agent for code execution in sandboxed environments.
 
 Usage:
     >>> from agent import Agent, AgentArgs
-    >>>
-    >>> args = AgentArgs(
-    ...     llm_name="openai/gpt-4",
-    ...     system_prompt="You are a coding assistant.",
-    ...     instance_prompt="Fix the bug in file.py",
-    ... )
+    >>> args = AgentArgs(llm_name="openai/gpt-4", system_prompt="You are a coder.", instance_prompt="Fix file.py")
     >>> agent = Agent(args)
-    >>> result = agent.run()
+    >>> trajectory = agent.run(runtime, "Create hello.py")
 """
 
-import os
-import re
 import copy
 import json
-import time
 import logging
-from typing import Dict, List, Any, Tuple, Optional, Callable
-from dataclasses import dataclass, field
+import os
+import re
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, Optional
 
 import litellm
-litellm.drop_params = True
-
 from rich.console import Console
-from rich.panel import Panel
-from rich.text import Text
 from rich.logging import RichHandler
 from rich.markup import escape
+from rich.panel import Panel
 
 from action import Action
-from trajectory import TrajectoryStep, Trajectory
-from tools import str_replace_editor_tool, execute_bash_tool, submit_tool
+from tools import execute_bash_tool, str_replace_editor_tool, submit_tool
+from trajectory import Trajectory, TrajectoryStep
+
+litellm.drop_params = True
 
 
 def get_logger(name: str) -> logging.Logger:
     """Get a logger with RichHandler for colorful output."""
     logger = logging.getLogger(name)
-    
+
     # Remove existing handlers
     while logger.handlers:
         logger.removeHandler(logger.handlers[0])
-    
+
     # Remove root logger handlers
     root_logger = logging.getLogger()
     while root_logger.handlers:
         root_logger.removeHandler(root_logger.handlers[0])
-    
+
     logger.setLevel(logging.INFO)
-    
+
     # Create RichHandler
     rich_handler = RichHandler(
-        rich_tracebacks=True, 
+        rich_tracebacks=True,
         show_path=False,
         show_time=True,
         show_level=True,
     )
     rich_handler.setFormatter(logging.Formatter("%(message)s"))
     logger.addHandler(rich_handler)
-    
+
     return logger
 
 
@@ -128,77 +95,26 @@ class AgentArgs:
     system_prompt: str  # System prompt for LLM
     instance_prompt: str  # Task prompt for this session
     llm_name: str  # Model name for litellm
-    llm_base_url: Optional[str] = None  # Custom API base URL
+    llm_base_url: str | None = None  # Custom API base URL
     max_retries: int = 5  # Max API retry attempts
     save_litellm_response: bool = False  # Save LLM responses
-    output_dir: Optional[str] = None  # Output directory
-    extra_body: Optional[Dict[str, Any]] = None  # Extra API params
+    output_dir: str | None = None  # Output directory
+    extra_body: dict[str, Any] | None = None  # Extra API params
     quiet: bool = False  # Suppress output for benchmarks
 
 
 class Agent:
     """Autonomous agent for code execution using LLM tool calling.
 
-    The Agent class orchestrates interactions between:
-    1. User task (via instance_prompt)
-    2. LLM (via litellm for multi-provider support)
-    3. Tools (file editor, bash, submit)
-    4. Sandbox runtime (Docker, Kaggle, or Local)
-
-    Execution Flow:
-        1. Initialize with AgentArgs
-        2. Build initial message with system + instance prompt
-        3. Loop (max_steps times):
-            a. Send messages to LLM
-            b. Get tool calls in response
-            c. Execute each tool call
-            d. Add observations to messages
-            e. Check for submit action -> stop
-        4. Return final trajectory
-
-    Attributes:
-        args: Agent configuration.
-        llm_name: Model identifier.
-        llm_base_url: API endpoint (if using local model).
-        system_prompt_template: System prompt string.
-        instance_prompt_template: Task prompt string.
-        quiet: If True, suppress console output.
-        trajectory: Execution history (thought/action/observation).
-        logger: Rich-compatible logger.
-
-    Example:
-        >>> from agent import Agent, AgentArgs
-        >>>
-        >>> args = AgentArgs(
-        ...     llm_name="openai/gpt-4",
-        ...     system_prompt="You are a Python coding assistant.",
-        ...     instance_prompt="Create a file at /testbed/hello.py with 'Hello World'",
-        ... )
-        >>> agent = Agent(args)
-        >>> trajectory = agent.run()
-        >>> print(trajectory.to_json())
-
-    Note:
-        - Uses litellm for unified LLM API (OpenAI, Anthropic, etc.)
-        - Automatically handles token limits with smart truncation
-        - Records full trajectory for RL training
-    """
-    """
-    Agent 类：负责模型行为控制和与环境交互
-
-    主要功能：
-    - 管理与 LLM 的通信（model_query）
-    - 解析模型响应并执行操作（_execute_action）
-    - 维护对话历史和执行轨迹（trajectory_steps）
-    - 支持重试机制和错误处理
+    Orchestrates LLM queries, tool execution, and trajectory recording
+    across Docker/Kaggle/Local sandbox runtimes.
     """
 
     def __init__(self, args: AgentArgs, logger=None):
         self.args = args
         self.llm_name = args.llm_name
-        self.quiet = args.quiet  # Disable console output (for benchmark mode)
-        
-        # Console for output (quiet mode captures to StringIO for later retrieval)
+        self.quiet = args.quiet
+
         if self.quiet:
             import io
             self._console_buffer = io.StringIO()
@@ -206,43 +122,32 @@ class Agent:
         else:
             self._console_buffer = None
             self.console = Console()
-        
-        # Set up logger (disable in quiet mode)
-        if logger is None:
-            self.logger = get_logger("Agent")
-        else:
-            self.logger = logger
-        
+
+        self.logger = logger or get_logger("Agent")
         if self.quiet:
-            self.logger.setLevel(logging.WARNING)  # Only show warnings and errors
-        
-        # Configure LLM base URL
+            self.logger.setLevel(logging.WARNING)
+
         self.llm_base_url = args.llm_base_url
-        if self.llm_base_url is None:
-            if ("openai/" in self.llm_name) or ("hosted_vllm" in self.llm_name):
-                self.llm_base_url = os.environ.get("LLM_BASE_URL", "http://localhost:8000/v1")
-        
+        if self.llm_base_url is None and ("openai/" in self.llm_name or "hosted_vllm" in self.llm_name):
+            self.llm_base_url = os.environ.get("LLM_BASE_URL", "http://localhost:8000/v1")
+
         self.system_prompt_template = args.system_prompt
         self.instance_prompt_template = args.instance_prompt
         self.max_retries = args.max_retries
-        
-        # Extra body params (e.g., {"chat_template_kwargs": {"thinking": True}))
         self.extra_body = args.extra_body
-        
+
         self.logger.info(f"Initialized Agent with LLM: {self.llm_name}")
         self.logger.info(f"🔗 LLM Base URL: {self.llm_base_url}")
         self.logger.info(f"📦 Extra body: {self.extra_body}")
-        
-        # Save litellm response settings
+
         self.save_litellm_response = args.save_litellm_response
         self.output_dir = args.output_dir
         self.llm_call_count = 0
         if self.save_litellm_response:
             self.logger.info(f"📝 Save LiteLLM response enabled, output_dir: {self.output_dir}")
-        
-        # Initialize trajectory
-        self.trajectory_steps: List[TrajectoryStep] = []
-        self.history: List[Dict[str, str]] = []
+
+        self.trajectory_steps: list[TrajectoryStep] = []
+        self.history: list[dict[str, str]] = []
 
     def get_console_output(self) -> str:
         """Get captured console output (only available in quiet mode)."""
@@ -255,7 +160,7 @@ class Agent:
         self.trajectory_steps = []
         self.history = []
 
-    def _count_tokens(self, messages: List[Dict[str, str]]) -> int:
+    def _count_tokens(self, messages: list[dict[str, str]]) -> int:
         """Count tokens in messages."""
         try:
             return litellm.token_counter(model=self.llm_name, messages=messages)
@@ -266,56 +171,33 @@ class Agent:
 
     def model_query(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         temperature: float = 1.0,
         max_tokens_per_call: int = 65536,
         max_token_limit: int = 65536,
-    ) -> Tuple[Any, float]:
-        """向 LLM 发送查询请求
-
-        参数:
-            messages: 对话消息列表
-            temperature: 采样温度，控制随机性
-            max_tokens_per_call: 每次调用最大生成 token 数
-            max_token_limit: 对话最大 token 数限制
-
-        返回:
-            (response, exec_time): LLM 响应对象和执行时间
-
-        处理流程:
-            1. 检查 token 数量是否超过限制
-            2. 调用 litellm.completion 进行查询
-            3. 遇到 token 超出错误时自动调整 max_tokens
-            4. 遇到速率限制错误时进行重试等待
-        """
+    ) -> tuple[Any, float]:
+        """向 LLM 发送查询请求，支持自动重试和 token 限制处理。"""
         tools = [str_replace_editor_tool, execute_bash_tool, submit_tool]
-        
+
         retries = 0
         messages_ = copy.deepcopy(messages)
-        
-        # Check token count
+
         total_tokens = self._count_tokens(messages_)
         self.logger.info(f"Total tokens in conversation: {total_tokens}")
-        
+
         if total_tokens > max_token_limit:
             self.logger.warning(f"Total tokens: {total_tokens} > {max_token_limit}")
             raise ValueError(f"Total tokens: {total_tokens} > {max_token_limit}")
-        
-        # For locally hosted models with custom base URL, keep the API key from env
-        # (some servers require a dummy key even if not used for auth)
-        
+
         start_time = time.time()
         response = None
-        
+
         while retries < self.max_retries:
             try:
                 kwargs = {}
-                
-                # Temperature (some models don't support it)
                 if "o3" not in self.llm_name and "o4" not in self.llm_name:
                     kwargs["temperature"] = temperature
-                
-                # Merge user's extra_body if provided
+
                 extra_params = {}
                 if self.extra_body:
                     extra_params["extra_body"] = self.extra_body
@@ -324,52 +206,51 @@ class Agent:
                     model=self.llm_name,
                     tools=tools,
                     messages=messages_,
-                    timeout=1200,  # 20 min HTTP timeout (includes queue + generation)
+                    timeout=1200,
                     api_base=self.llm_base_url,
                     max_tokens=max_tokens_per_call,
                     **extra_params,
                     **kwargs,
                 )
-                self.logger.info(f"LLM query complete")
-                
-                # Save litellm request and response if enabled
+                self.logger.info("LLM query complete")
+
                 if self.save_litellm_response and self.output_dir:
                     self._save_litellm_response(messages_, response, extra_params, kwargs)
-                
+
                 break
-                
+
             except Exception as e:
                 error_msg = str(e)
                 self.logger.error(f"LLM query failed @ {retries}: {e}")
-                
+
                 # Check if it's a token limit error
                 if "token" in error_msg.lower() and ("exceed" in error_msg.lower() or "limit" in error_msg.lower() or "maximum" in error_msg.lower()):
-                    self.logger.warning(f"⚠️ Token limit error detected, attempting to handle...")
-                    
+                    self.logger.warning("⚠️ Token limit error detected, attempting to handle...")
+
                     # Parse error message:
                     # "maximum context length of 163840 tokens. You requested a total of 179069 tokens: 113533 tokens from the input messages and 65536 tokens for the completion"
                     context_match = re.search(r'(?:maximum|context)[^\d]*(\d+)\s*tokens', error_msg, re.IGNORECASE)
                     input_match = re.search(r'(\d+)\s*tokens?\s*(?:from\s*(?:the\s*)?(?:input|messages?)|in\s*(?:the\s*)?(?:input|prompt|messages?))', error_msg, re.IGNORECASE)
-                    
+
                     max_context = int(context_match.group(1)) if context_match else None
                     current_input_tokens = int(input_match.group(1)) if input_match else None
-                    
+
                     # Minimum completion tokens to preserve
                     min_completion_tokens = 8192
-                    
+
                     self.logger.warning(f"📊 Parsed error: max_context={max_context}, input={current_input_tokens}, max_tokens_per_call={max_tokens_per_call}")
-                    
+
                     if max_context and current_input_tokens:
                         # Strategy 1: Reduce max_tokens (completion tokens)
                         available_for_completion = max_context - current_input_tokens - 100  # 100 buffer
-                        
+
                         if available_for_completion >= min_completion_tokens:
                             new_max_tokens = min(available_for_completion, max_tokens_per_call)
                             if new_max_tokens < max_tokens_per_call:
                                 self.logger.warning(f"📉 Token limit exceeded, reducing max_tokens: {max_tokens_per_call} -> {new_max_tokens} (input {current_input_tokens}, context {max_context})")
                                 max_tokens_per_call = new_max_tokens
                                 continue
-                        
+
                         # Not enough space even with min_completion_tokens
                         self.logger.warning(f"⚠️ Input tokens ({current_input_tokens}) too large, cannot fit in context ({max_context}) with min completion space")
                         raise
@@ -383,25 +264,25 @@ class Agent:
                         else:
                             self.logger.warning(f"⚠️ max_tokens already at minimum ({min_completion_tokens}), cannot reduce further")
                             raise
-                
+
                 retries += 1
-                
+
                 if "RateLimitError" in str(e):
                     time.sleep(60)
-                
+
                 if retries >= self.max_retries:
                     raise e
-        
+
         exec_time = time.time() - start_time
         return response, exec_time
 
-    def _save_litellm_response(self, messages: List[Dict], response, extra_params: Dict, kwargs: Dict):
+    def _save_litellm_response(self, messages: list[dict], response, extra_params: dict, kwargs: dict):
         """Save litellm request and response to output_dir for debugging."""
         try:
             self.llm_call_count += 1
             save_path = self.output_dir
             os.makedirs(save_path, exist_ok=True)
-            
+
             # Save request
             request_data = {
                 "call_id": self.llm_call_count,
@@ -414,7 +295,7 @@ class Agent:
             request_file = os.path.join(save_path, f"request_{self.llm_call_count:03d}.json")
             with open(request_file, "w", encoding="utf-8") as f:
                 json.dump(request_data, f, indent=2, ensure_ascii=False)
-            
+
             # Save response (raw dict from litellm)
             response_data = {
                 "call_id": self.llm_call_count,
@@ -423,36 +304,26 @@ class Agent:
             response_file = os.path.join(save_path, f"response_{self.llm_call_count:03d}.json")
             with open(response_file, "w", encoding="utf-8") as f:
                 json.dump(response_data, f, indent=2, ensure_ascii=False)
-            
+
             self.logger.info(f"💾 Saved LiteLLM request/response #{self.llm_call_count} to {save_path}")
         except Exception as e:
             self.logger.warning(f"Failed to save litellm response: {e}")
 
-    def parse_response(self, response) -> Tuple[str, Action, Optional[str]]:
-        """解析 LLM 响应
+    def parse_response(self, response) -> tuple[str, Action, str | None]:
+        """从 LLM 响应中提取 thought、action 和 tool_call_id。"""
+        thought = response.choices[0].message.content or ""
 
-        从 LLM 响应中提取：
-        - thought: 模型的思考内容
-        - action: 执行的操作（工具调用）
-        - tool_call_id: 工具调用 ID
-
-        返回:
-            Tuple of (thought, action, tool_call_id)
-        """
-        thought = response.choices[0].message.content
-        if not thought:
-            thought = ""
-        
         tool_call_id = None
         try:
             tool_call = response.choices[0].message.tool_calls[0]
-            function_name = tool_call.function.name
-            parameters = json.loads(tool_call.function.arguments)
-            tool_call_id = tool_call.id  # Use the actual tool_call_id from response
-            action = Action(function_name=function_name, parameters=parameters)
+            action = Action(
+                function_name=tool_call.function.name,
+                parameters=json.loads(tool_call.function.arguments),
+            )
+            tool_call_id = tool_call.id
         except Exception:
             action = Action(function_name="", parameters={})
-        
+
         return thought, action, tool_call_id
 
     def run(
@@ -463,108 +334,48 @@ class Agent:
         max_token_limit: int = 65536,
         max_tokens_per_call: int = 65536,
         temperature: float = 1.0,
-    ) -> Trajectory:
-        """Execute the agent to complete a task.
-
-        This is the main execution loop. The agent:
-        1. Builds initial messages (system + task prompt)
-        2. Loops up to max_steps times:
-            a. Queries LLM with current messages
-            b. Parses response for thought + action
-            c. Executes action in sandbox runtime
-            d. Adds observation to messages
-            e. Checks for submit action -> stop if done
-        3. Returns full execution trajectory
-
-        Args:
-            runtime: Sandbox runtime for command execution.
-                Types: DockerRuntime, KaggleRuntime, LocalRuntime.
-            problem_statement: The task description.
-                Example: "Fix the bug in /testbed/app.py"
-            max_steps: Max conversation turns (default: 30).
-                Agent stops after this many LLM calls.
-            max_token_limit: Max tokens in conversation (default: 65536).
-                Raises ValueError if exceeded.
-            max_tokens_per_call: Max tokens to generate (default: 65536).
-            temperature: Sampling temperature (default: 1.0).
-                Higher = more creative, lower = more deterministic.
-
-        Returns:
-            Trajectory: Full execution history.
-                Contains list of TrajectoryStep with
-                thought, action, observation for each step.
-
-        Raises:
-            ValueError: If total tokens exceed max_token_limit.
-
-        Example:
-            >>> from agent import Agent, AgentArgs
-            >>> from runtime import create_runtime
-            >>>
-            >>> args = AgentArgs(
-            ...     llm_name="openai/gpt-4",
-            ...     system_prompt="You are a coding assistant.",
-            ...     instance_prompt="Create hello.py",
-            ... )
-            >>> agent = Agent(args)
-            >>> runtime = create_runtime("docker")
-            >>> trajectory = agent.run(runtime, "Create hello.py with 'print Hello'")
-            >>> print(f"Completed in {len(trajectory.steps)} steps")
-        """
+) -> Trajectory:
+        """Execute the agent to complete a task via LLM-driven tool calling."""
         self.reset()
-        self.logger.info(f"Starting agent run:")
+        self.logger.info("Starting agent run:")
         self.logger.info(f"max_steps={max_steps}")
         self.logger.info(f"max_token_limit={max_token_limit}")
         self.logger.info(f"max_tokens_per_call={max_tokens_per_call}")
         self.logger.info(f"temperature={temperature}")
-        
-        # Prepare system prompt
+
         system_prompt = self.system_prompt_template.format(
             command_docs="",
             demo="",
         )
-        
-        # Prepare user prompt using instance_prompt template if available
+
         if self.instance_prompt_template:
             user_prompt = self.instance_prompt_template.format(
                 problem_statement=problem_statement,
             )
         else:
             user_prompt = problem_statement
-        
-        # Initialize conversation
+
         self.history = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
-        
+
         # Print prompts
-        self.console.print(Panel(
-            escape(system_prompt[:2000] + "..." if len(system_prompt) > 2000 else system_prompt),
-            title="[bold cyan]SYSTEM PROMPT[/bold cyan]",
-            border_style="cyan",
-            padding=(0, 1),
-        ))
-        self.console.print(Panel(
-            escape(user_prompt[:2000] + "..." if len(user_prompt) > 2000 else user_prompt),
-            title="[bold cyan]USER PROMPT[/bold cyan]",
-            border_style="cyan",
-            padding=(0, 1),
-        ))
-        self.console.print(Panel(
-            escape(user_prompt[:2000] + "..." if len(user_prompt) > 2000 else user_prompt),
-            title="[bold cyan]USER PROMPT[/bold cyan]",
-            border_style="cyan",
-            padding=(0, 1),
-        ))
-        
+        for title, content in [("SYSTEM PROMPT", system_prompt), ("USER PROMPT", user_prompt)]:
+            self.console.print(Panel(
+                escape(content[:2000] + "..." if len(content) > 2000 else content),
+                title=f"[bold cyan]{title}[/bold cyan]",
+                border_style="cyan",
+                padding=(0, 1),
+            ))
+
         done = False
         step_count = 0
-        
+
         while not done and step_count < max_steps:
             self.console.print()
             self.console.rule(f"[bold blue]Step {step_count + 1}/{max_steps}[/bold blue]", style="blue")
-            
+
             # Add step count message to history
             steps_remaining = max_steps - step_count
             if steps_remaining > 0:
@@ -573,9 +384,9 @@ class Agent:
                 step_msg = "You have reached the maximum number of steps. Please submit your answer NOW."
             self.history[-1]["content"] += f"\n{step_msg}"
             self.logger.info(step_msg)
-            
+
             messages = self.history.copy()
-            
+
             # Query LLM
             try:
                 response, exec_time = self.model_query(
@@ -587,7 +398,7 @@ class Agent:
             except Exception as e:
                 self.logger.error(f"LLM query failed: {e}")
                 break
-            
+
             # Extract reasoning_content from response
             reasoning_content = ""
             try:
@@ -609,7 +420,7 @@ class Agent:
 
             # Parse response
             thought, action, tool_call_id = self.parse_response(response)
-            
+
             # Print thought
             if thought:
                 thought_display = thought[:1000] + "..." if len(thought) > 1000 else thought
@@ -619,7 +430,7 @@ class Agent:
                     border_style="magenta",
                     padding=(0, 1),
                 ))
-            
+
             # Print action
             action_text = f"[bold]{action.function_name}[/bold]"
             if action.parameters:
@@ -633,10 +444,10 @@ class Agent:
                 border_style="yellow",
                 padding=(0, 1),
             ))
-            
+
             # Execute and observe
             observation = self._execute_action(action, runtime)
-            
+
             # Print observation
             obs_display = observation[:800] + "..." if len(observation) > 800 else observation
             self.console.print(Panel(
@@ -645,7 +456,7 @@ class Agent:
                 border_style="green",
                 padding=(0, 1),
             ))
-            
+
             # Record step
             step_record = TrajectoryStep(
                 thought=thought,
@@ -655,7 +466,7 @@ class Agent:
                 metadata={"step": step_count + 1, "exec_time": exec_time},
             )
             self.trajectory_steps.append(step_record)
-            
+
             # Update history
             assistant_msg = response.choices[0].message
             if hasattr(assistant_msg, 'model_dump'):
@@ -665,7 +476,7 @@ class Agent:
             else:
                 assistant_msg_dict = dict(assistant_msg)
             self.history.append(assistant_msg_dict)
-            
+
             # Add tool result or CONTINUE_MSG
             if action.function_name and tool_call_id:
                 self.history.append({
@@ -679,98 +490,73 @@ class Agent:
                     "role": "user",
                     "content": observation,  # This is CONTINUE_MSG
                 })
-            
+
             # Check if done
             if action.function_name == "submit":
                 done = True
                 self.logger.info("Agent submitted answer")
-            
+
             step_count += 1
-        
+
         # Create trajectory
         trajectory = Trajectory(
             problem_statement=problem_statement,
             steps=self.trajectory_steps,
             metadata={"total_steps": step_count},
         )
-        
+
         return trajectory
 
     def _execute_action(self, action: Action, runtime) -> str:
-        """执行 Action 操作
-
-        根据 action 的类型执行相应的操作：
-        - execute_bash: 执行 shell 命令
-        - str_replace_editor: 文件操作（view, create, str_replace, insert）
-        - submit: 提交答案
-
-        参数:
-            action: Action 对象，包含 function_name 和 parameters
-            runtime: DockerRuntime 实例
-
-        返回:
-            str: 执行结果或错误信息
-        """
+        """根据 action 类型执行对应操作：execute_bash / str_replace_editor / submit。"""
         from .observation import Observation
-        
+
         if not action.function_name or not isinstance(action.parameters, dict):
-            # Use Observation class to return CONTINUE_MSG
-            # This handles: empty function_name, or malformed parameters (e.g., str instead of dict)
             obs = Observation(bash_output="", error_code=0, action=action)
             return str(obs)
-        
+
         if action.function_name == "execute_bash":
             command = action.parameters.get("command", "")
             if not command:
                 return "Error: No command provided."
-            # Use demux_run to get separate stdout and stderr
             stdout, stderr, exit_code = runtime.demux_run(command)
-            
+
             obs = Observation(
-                bash_output=stdout + stderr,  # Combined for backward compatibility
+                bash_output=stdout + stderr,
                 error_code=exit_code,
                 action=action,
                 stdout=stdout,
                 stderr=stderr,
             )
             return str(obs)
-        
+
         elif action.function_name == "str_replace_editor":
             result = self._execute_str_replace_editor(action, runtime)
             obs = Observation(bash_output=result, error_code=0, action=action)
             return str(obs)
-        
+
         elif action.function_name == "submit":
             obs = Observation(bash_output="", error_code=0, action=action)
             return str(obs)
-        
+
         else:
             return f"Unknown action: {action.function_name}"
 
     def _execute_str_replace_editor(self, action: Action, runtime) -> str:
-        """执行 str_replace_editor 文件编辑操作
-
-        支持以下命令：
-        - view: 查看文件或目录内容
-          - 目录：列出 2 层深度内的 .py 和 .rst 文件
-          - 文件：显示带行号的内容，支持 view_range 参数指定范围
-        - create: 创建新文件
-        - str_replace: 替换文件中的指定字符串（精确匹配一处）
-        - insert: 在指定行后插入内容
-        """
-        SNIPPET_LINES = 4
-        MAX_RESPONSE_LEN = 10000
-        TRUNCATED_MESSAGE = (
+        """执行 str_replace_editor 文件操作，支持 view/create/str_replace/insert 命令。"""
+        snippet_lines = 4
+        max_response_len = 10000
+        truncated_message = (
             "<response clipped><NOTE>To save on context only part of this file has been "
             "shown to you. You should retry this tool after you have searched inside the file "
             "with `grep -n` in order to find the line numbers of what you are looking for.</NOTE>"
         )
-        
-        def maybe_truncate(content: str, truncate_after: int = MAX_RESPONSE_LEN) -> str:
+
+        def maybe_truncate(content: str, truncate_after: int = max_response_len) -> str:
             if not truncate_after or len(content) <= truncate_after:
                 return content
-            return content[:truncate_after] + TRUNCATED_MESSAGE
-        
+            return content[:truncate_after] + truncated_message
+
         def make_output(file_content: str, file_descriptor: str, init_line: int = 1) -> str:
             """Format file content with line numbers like cat -n."""
             file_content = maybe_truncate(file_content)
@@ -778,177 +564,148 @@ class Agent:
             lines = file_content.split("\n")
             numbered = "\n".join(f"{i + init_line:6}\t{line}" for i, line in enumerate(lines))
             return f"Here's the result of running `cat -n` on {file_descriptor}:\n{numbered}\n"
-        
+
         params = action.parameters
         command = params.get("command", "")
         path = params.get("path", "")
-        
+
         if not command or not path:
             return "Error: command and path are required."
-        
+
         if command == "view":
-            # First check if path is a directory or file
             check_cmd = f"test -d {path} && echo 'dir' || (test -f {path} && echo 'file' || echo 'notfound')"
             path_type, _ = runtime.run(check_cmd)
             path_type = path_type.strip()
-            
+
             if path_type == "dir":
-                # List directory contents up to 2 levels deep (only .py and .rst files, like R2E-Gym)
                 cmd = f"find {path} -maxdepth 2 -not -path '*/.*' \\( -type d -o -name '*.py' -o -name '*.rst' \\) | head -100"
                 output, _ = runtime.run(cmd)
                 if output:
                     return f"Here's the files and directories up to 2 levels deep in {path}, excluding hidden:\n{output}"
                 return f"(empty directory: {path})"
             elif path_type == "file":
-                # Only allow viewing .py and .rst files (like R2E-Gym)
                 if not (path.endswith('.py') or path.endswith('.rst')):
                     return f"ERROR: Viewing non-Python files is disallowed for saving context. File '{path}' is not a .py or .rst file."
-                
+
                 view_range = params.get("view_range")
-                # Read full file first
                 file_content, _ = runtime.run(f"cat {path}")
                 if not file_content:
                     return f"(empty file: {path})"
-                
+
                 file_content = file_content.expandtabs()
                 lines = file_content.split('\n')
                 total_lines = len(lines)
-                
+
                 if view_range and len(view_range) == 2:
                     start, end = view_range
-                    # Validate range
                     if not (1 <= start <= total_lines):
                         return f"Error: Invalid view_range {view_range}: start line must be in [1, {total_lines}]"
                     if end != -1 and (end < start or end > total_lines):
                         return f"Error: Invalid view_range {view_range}: end must be >= start and <= {total_lines}, or -1 to view until end."
-                    
-                    # Slice lines (1-based indexing)
-                    if end == -1:
-                        sliced_lines = lines[start-1:]
-                    else:
-                        sliced_lines = lines[start-1:end]
-                    
+
+                    sliced_lines = lines[start-1:] if end == -1 else lines[start-1:end]
                     numbered = "\n".join(f"{i + start:6}\t{line}" for i, line in enumerate(sliced_lines))
                 else:
-                    # Show full file
-                    start = 1
                     numbered = "\n".join(f"{i + 1:6}\t{line}" for i, line in enumerate(lines))
-                
+
                 result = f"Here's the result of running `cat -n` on {path}:\n{numbered}"
                 return maybe_truncate(result)
             else:
                 return f"Error: Path not found: {path}"
-        
+
         elif command == "create":
-            file_text = params.get("file_text", "")
-            # Convert to string in case model returns non-string (e.g., int)
-            file_text = str(file_text)
-            # Escape the text for shell
+            file_text = str(params.get("file_text", ""))
             escaped_text = file_text.replace("'", "'\"'\"'")
             cmd = f"mkdir -p $(dirname {path}) && echo '{escaped_text}' > {path}"
             output, exit_code = runtime.run(cmd)
             if "Error" in str(exit_code):
                 return f"Error creating file: {output}"
-            
-            # Return file content for review (like R2E-Gym)
+
             success_msg = f"File created at {path}. "
             success_msg += make_output(file_text, str(path))
             success_msg += "Review the file and make sure that it is as expected. Edit the file if necessary."
             return success_msg
-        
+
         elif command == "str_replace":
             old_str = params.get("old_str", "")
             new_str = params.get("new_str", "")
-            
+
             if not old_str:
                 return "Error: old_str is required for str_replace."
-            
-            # Read the file
+
             file_content, _ = runtime.run(f"cat {path}")
             if not file_content:
                 return f"Error: Could not read file {path}"
-            
-            # Expand tabs (like R2E-Gym)
+
             file_content = file_content.expandtabs()
             old_str = old_str.expandtabs()
             new_str = new_str.expandtabs() if new_str else ""
-            
-            # Check occurrences
+
             occurrences = file_content.count(old_str)
             if occurrences == 0:
                 return f"Error: No occurrences of old_str found in {path} for replacement."
             if occurrences > 1:
                 return f"Error: Multiple occurrences ({occurrences}) of old_str found in {path}. Please ensure it is unique before using str_replace."
-            
-            # Find replacement line for snippet
+
             replacement_line = file_content.split(old_str)[0].count("\n")
-            
-            # Replace
             new_content = file_content.replace(old_str, new_str if new_str else "", 1)
-            
-            # Write back
+
             escaped_content = new_content.replace("'", "'\"'\"'")
             cmd = f"echo '{escaped_content}' > {path}"
             _, exit_code = runtime.run(cmd)
-            
+
             if "Error" in str(exit_code):
                 return f"Error writing file: {path}"
-            
-            # Return snippet around the change for review
+
             new_lines = new_content.split("\n")
-            start_line = max(0, replacement_line - SNIPPET_LINES)
-            end_line = replacement_line + SNIPPET_LINES + (new_str or "").count("\n")
+            start_line = max(0, replacement_line - snippet_lines)
+            end_line = replacement_line + snippet_lines + (new_str or "").count("\n")
             snippet = "\n".join(new_lines[start_line:end_line + 1])
-            
+
             success_msg = f"The file {path} has been edited. "
             success_msg += make_output(snippet, f"a snippet of {path}", start_line + 1)
             success_msg += "Review the changes and make sure they are as expected. Edit the file again if necessary."
             return success_msg
-        
+
         elif command == "insert":
             insert_line = params.get("insert_line", 0)
             new_str = params.get("new_str", "")
-            
+
             if not new_str:
                 return "Error: new_str is required for insert."
-            
-            # Read the file
+
             file_content, _ = runtime.run(f"cat {path}")
             # Expand tabs (like R2E-Gym)
             file_content = file_content.expandtabs() if file_content else ""
             new_str = new_str.expandtabs()
             lines = file_content.split('\n') if file_content else []
-            
-            # Validate insert_line
+
             if insert_line < 0 or insert_line > len(lines):
                 return f"Error: Invalid insert_line {insert_line}. Must be in [0, {len(lines)}]."
-            
-            # Insert
+
             new_str_lines = new_str.split("\n")
             new_lines = lines[:insert_line] + new_str_lines + lines[insert_line:]
             new_content = '\n'.join(new_lines)
-            
-            # Write back
+
             escaped_content = new_content.replace("'", "'\"'\"'")
             cmd = f"echo '{escaped_content}' > {path}"
             _, exit_code = runtime.run(cmd)
-            
+
             if "Error" in str(exit_code):
                 return f"Error writing file: {path}"
-            
-            # Return snippet around the inserted content for review
+
             snippet_lines = (
-                lines[max(0, insert_line - SNIPPET_LINES):insert_line]
+                lines[max(0, insert_line - snippet_lines):insert_line]
                 + new_str_lines
-                + lines[insert_line:insert_line + SNIPPET_LINES]
+                + lines[insert_line:insert_line + snippet_lines]
             )
             snippet = "\n".join(snippet_lines)
-            
+
             success_msg = f"The file {path} has been edited. "
-            success_msg += make_output(snippet, "a snippet of the edited file", max(1, insert_line - SNIPPET_LINES + 1))
-            success_msg += "Review the changes and make sure they are as expected (correct indentation, no duplicate lines, etc). Edit the file again if necessary."
+            success_msg += make_output(snippet, "a snippet of the edited file", max(1, insert_line - snippet_lines + 1))
+            success_msg += "Review the changes and make sure they are as expected. Edit the file again if necessary."
             return success_msg
-        
+
         else:
             return f"Unknown command: {command}"
 
@@ -961,8 +718,8 @@ class AgentRegistry:
     """Agent注册表 - 管理多个Agent实例"""
 
     def __init__(self):
-        self._agents: Dict[str, 'Agent'] = {}
-        self._factories: Dict[str, Callable] = {}
+        self._agents: dict[str, Agent] = {}
+        self._factories: dict[str, Callable] = {}
 
     def register(self, name: str, agent: 'Agent'):
         """注册一个Agent实例"""
@@ -983,11 +740,11 @@ class AgentRegistry:
             return factory(**kwargs)
         return None
 
-    def list_agents(self) -> List[str]:
+    def list_agents(self) -> list[str]:
         """列出所有已注册的Agent"""
         return list(self._agents.keys())
 
-    def list_factories(self) -> List[str]:
+    def list_factories(self) -> list[str]:
         """列出所有已注册的工厂"""
         return list(self._factories.keys())
 
@@ -1006,8 +763,8 @@ _global_registry = AgentRegistry()
 
 def _create_agent_factory(agent_type: str):
     """创建指定类型Agent的工厂函数"""
-    def factory(llm_name: str, llm_base_url: Optional[str] = None,
-        system_prompt: Optional[str] = None, instance_prompt: Optional[str] = None,
+    def factory(llm_name: str, llm_base_url: str | None = None,
+        system_prompt: str | None = None, instance_prompt: str | None = None,
         quiet: bool = False, **kwargs) -> 'Agent':
         prompts = {
             "coder": ("""你是一个专业的Coder Agent，专注于编写高质量的代码。\n\n<CAPABILITIES>\n- 编写Python、JavaScript、Java、C++、Go、Rust等多种编程语言\n- 代码重构和优化\n- 调试和bug修复\n- 单元测试编写\n- 代码审查\n</CAPABILITIES>\n\n<TOOLS>\n- execute_bash: 执行shell命令和脚本\n- str_replace_editor: 查看、创建和编辑文件\n- submit: 提交完成的任务\n</TOOLS>\n\n<WORKFLOW>\n1. 理解需求并分析问题\n2. 设计代码结构和算法\n3. 编写代码并测试\n4. 调试和优化\n5. 提交完成的任务\n</WORKFLOW>""",
@@ -1032,30 +789,30 @@ def _create_agent_factory(agent_type: str):
     return factory
 
 
-def create_coder_agent(llm_name: str, llm_base_url: Optional[str] = None,
-    system_prompt: Optional[str] = None, instance_prompt: Optional[str] = None, **kwargs) -> 'Agent':
+def create_coder_agent(llm_name: str, llm_base_url: str | None = None,
+    system_prompt: str | None = None, instance_prompt: str | None = None, **kwargs) -> 'Agent':
     return _create_agent_factory("coder")(llm_name, llm_base_url, system_prompt, instance_prompt, **kwargs)
 
 
-def create_analyzer_agent(llm_name: str, llm_base_url: Optional[str] = None,
-    system_prompt: Optional[str] = None, instance_prompt: Optional[str] = None, **kwargs) -> 'Agent':
+def create_analyzer_agent(llm_name: str, llm_base_url: str | None = None,
+    system_prompt: str | None = None, instance_prompt: str | None = None, **kwargs) -> 'Agent':
     return _create_agent_factory("analyzer")(llm_name, llm_base_url, system_prompt, instance_prompt, **kwargs)
 
 
-def create_research_agent(llm_name: str, llm_base_url: Optional[str] = None,
-    system_prompt: Optional[str] = None, instance_prompt: Optional[str] = None, **kwargs) -> 'Agent':
+def create_research_agent(llm_name: str, llm_base_url: str | None = None,
+    system_prompt: str | None = None, instance_prompt: str | None = None, **kwargs) -> 'Agent':
     return _create_agent_factory("research")(llm_name, llm_base_url, system_prompt, instance_prompt, **kwargs)
 
 
-def create_general_agent(llm_name: str, llm_base_url: Optional[str] = None,
-    system_prompt: Optional[str] = None, instance_prompt: Optional[str] = None,
+def create_general_agent(llm_name: str, llm_base_url: str | None = None,
+    system_prompt: str | None = None, instance_prompt: str | None = None,
     quiet: bool = False, **kwargs) -> 'Agent':
     return _create_agent_factory("general")(llm_name, llm_base_url, system_prompt, instance_prompt, quiet, **kwargs)
 
 
 def create_agent(agent_type: str = "general", llm_name: str = "openai/gpt-4",
-    llm_base_url: Optional[str] = None, system_prompt: Optional[str] = None,
-    instance_prompt: Optional[str] = None, **kwargs) -> 'Agent':
+    llm_base_url: str | None = None, system_prompt: str | None = None,
+    instance_prompt: str | None = None, **kwargs) -> 'Agent':
     """创建Agent的工厂函数，支持coder/analyzer/research/general类型"""
     factories = {
         "coder": create_coder_agent,
@@ -1078,4 +835,4 @@ _global_registry.register_factory("analyzer", create_analyzer_agent)
 _global_registry.register_factory("research", create_research_agent)
 _global_registry.register_factory("general", create_general_agent)
 
-            
+

@@ -1,9 +1,9 @@
-from typing import Dict
 
 from action import Action
+
 # 当智能体未调用任何工具时返回的提示消息
 CONTINUE_MSG = """
-You forgot to use a function call in your response. 
+You forgot to use a function call in your response.
 YOU MUST USE A FUNCTION CALL IN EACH RESPONSE.
 
 IMPORTANT: YOU SHOULD NEVER ASK FOR HUMAN HELP.
@@ -22,7 +22,7 @@ class Observation:
         stderr: 标准错误（分离后）
     """
 
-    def __init__(self, bash_output, error_code, action: Action, num_lines: int = 40, 
+    def __init__(self, bash_output, error_code, action: Action, num_lines: int = 40,
                  stdout: str = None, stderr: str = None):
         """
         初始化观察结果。
@@ -77,7 +77,7 @@ class Observation:
         """
         # 安全获取函数名
         func_name = getattr(self.action, 'function_name', '') if self.action else ''
-        
+
         if not func_name:
             return CONTINUE_MSG
         elif func_name == "finish" or func_name == "submit":
@@ -89,16 +89,16 @@ class Observation:
                     # 使用分离的stdout/stderr格式
                     stdout_str = self._truncate_output(self.stdout or "")
                     stderr_str = self._truncate_output(self.stderr or "")
-                    
+
                     output_parts = [f"Exit code: {self.error_code}"]
                     # 使用转义括号防止Rich解释为标记
                     output_parts.append(f"Execution output of \\[{func_name}]:")
-                    
+
                     if stdout_str.strip():
                         output_parts.append(f"\\[STDOUT]\n{stdout_str}")
                     else:
                         output_parts.append("\\[STDOUT]\n")
-                    
+
                     if stderr_str.strip():
                         output_parts.append(f"\\[STDERR]\n{stderr_str}")
                     # 仅在实际有stderr内容时显示STDERR部分

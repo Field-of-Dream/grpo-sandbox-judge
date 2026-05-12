@@ -9,10 +9,10 @@ from grpo_in_sandbox.agent import (
     AgentArgs,
     AgentRegistry,
     create_agent,
-    create_coder_agent,
     create_analyzer_agent,
-    create_research_agent,
+    create_coder_agent,
     create_general_agent,
+    create_research_agent,
     get_registry,
 )
 

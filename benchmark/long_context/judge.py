@@ -11,11 +11,12 @@ Usage:
         --num_workers 32
 """
 
-import json
 import argparse
+import json
 import os
-from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
+
 from tqdm import tqdm
 
 
@@ -34,7 +35,7 @@ The OFFICIAL ANSWER: {ground_truth}
 CANDIDATE ANSWER TO ASSESS: {model_answer}
 
 Reply only with CORRECT or INCORRECT."""
-    
+
     return prompt
 
 
@@ -42,15 +43,15 @@ def extract_verdict(response_text: str) -> str:
     """
     Extract verdict from model response.
     Strategy: find the last occurrence of CORRECT or INCORRECT.
-    
+
     Returns: "CORRECT", "INCORRECT", or "UNKNOWN"
     """
     text_upper = response_text.upper()
-    
+
     # Find all positions of CORRECT and INCORRECT
     correct_positions = []
     incorrect_positions = []
-    
+
     # Find all "CORRECT" positions (not part of "INCORRECT")
     pos = 0
     while True:
@@ -60,7 +61,7 @@ def extract_verdict(response_text: str) -> str:
         if pos == 0 or text_upper[pos-2:pos] != "IN":
             correct_positions.append(pos)
         pos += 1
-    
+
     # Find all "INCORRECT" positions
     pos = 0
     while True:
@@ -69,14 +70,14 @@ def extract_verdict(response_text: str) -> str:
             break
         incorrect_positions.append(pos)
         pos += 1
-    
+
     # Get the last occurrence
     last_correct = max(correct_positions) if correct_positions else -1
     last_incorrect = max(incorrect_positions) if incorrect_positions else -1
-    
+
     if last_correct == -1 and last_incorrect == -1:
         return "UNKNOWN"
-    
+
     if last_incorrect > last_correct:
         return "INCORRECT"
     else:
@@ -86,16 +87,16 @@ def extract_verdict(response_text: str) -> str:
 def judge_single(args: dict) -> dict:
     """Judge a single problem"""
     import litellm
-    
+
     problem_id = args["problem_id"]
     question = args["question"]
     ground_truth = args["ground_truth"]
     model_answer = args["model_answer"]
     judge_config = args["judge_config"]
     debug = args.get("debug", False)
-    
+
     prompt = create_judge_prompt(question, ground_truth, model_answer)
-    
+
     # Debug: print first few prompts
     if debug:
         print(f"\n{'='*80}")
@@ -105,7 +106,7 @@ def judge_single(args: dict) -> dict:
         print(f"[DEBUG] Judge Config: model={judge_config['model']}, temp={judge_config.get('temperature')}, max_tokens={judge_config.get('max_tokens')}")
         print(f"[DEBUG] Full Prompt:\n{prompt}")
         print(f"{'='*80}\n")
-    
+
     kwargs = {
         "model": judge_config["model"],
         "messages": [{"role": "user", "content": prompt}],
@@ -117,17 +118,17 @@ def judge_single(args: dict) -> dict:
         kwargs["base_url"] = judge_config["base_url"]
     if judge_config.get("api_key"):
         kwargs["api_key"] = judge_config["api_key"]
-    
+
     try:
         response = litellm.completion(**kwargs)
         judge_response = response.choices[0].message.content or ""
         verdict = extract_verdict(judge_response)
         score = 1.0 if verdict == "CORRECT" else 0.0
-        
+
         if debug:
             print(f"[DEBUG] Judge Response: {judge_response}")
             print(f"[DEBUG] Verdict: {verdict}, Score: {score}")
-        
+
         return {
             "problem_id": problem_id,
             "verdict": verdict,
@@ -158,25 +159,25 @@ def main():
     parser.add_argument("--debug", type=int, default=0, help="Number of samples to debug (print prompt and response)")
     parser.add_argument("--num_repeats", type=int, default=4, help="Number of times to repeat each judgment (for reducing variance)")
     args = parser.parse_args()
-    
+
     # Auto-add openai/ prefix for custom LLM endpoints
     if args.judge_base_url and not args.judge_model.startswith(("openai/", "anthropic/", "azure/", "hosted_vllm/")):
         args.judge_model = f"openai/{args.judge_model}"
         print(f"Auto-added 'openai/' prefix to judge model: {args.judge_model}")
-    
+
     # Set dummy API key if not provided (some servers don't need auth)
     if args.api_key:
         os.environ["OPENAI_API_KEY"] = str(args.api_key)
     elif not os.environ.get("OPENAI_API_KEY"):
         os.environ["OPENAI_API_KEY"] = "dummy"
-    
+
     # Load trajectory data
     input_path = Path(args.input)
-    with open(input_path, "r") as f:
+    with open(input_path) as f:
         trajectory_data = json.load(f)
-    
+
     print(f"📂 Loaded {len(trajectory_data)} problems from {input_path}")
-    
+
     # Prepare judge config
     judge_config = {
         "model": args.judge_model,
@@ -185,7 +186,7 @@ def main():
         "temperature": args.temperature,
         "max_tokens": args.max_tokens,
     }
-    
+
     # Prepare tasks (repeat num_repeats times for variance reduction)
     tasks = []
     for run_idx in range(args.num_repeats):
@@ -201,18 +202,18 @@ def main():
                 "judge_config": judge_config,
                 "debug": run_idx == 0 and i < args.debug,  # Debug first N samples (only in first run)
             })
-    
-    print(f"🚀 Starting LLM-as-Judge evaluation")
+
+    print("🚀 Starting LLM-as-Judge evaluation")
     print(f"   Judge Model: {args.judge_model}")
     print(f"   Workers: {args.num_workers}")
     if args.num_repeats > 1:
         print(f"   Repeats: {args.num_repeats} (for variance reduction)")
-    
+
     # Run judge in parallel
     results = []
     with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
         futures = {executor.submit(judge_single, task): task["problem_id"] for task in tasks}
-        
+
         with tqdm(total=len(futures), desc="Judging") as pbar:
             for future in as_completed(futures):
                 result = future.result()
@@ -222,13 +223,13 @@ def main():
                     score=f"{sum(r['score'] for r in results) / len(results):.3f}",
                     errors=sum(1 for r in results if r['error']),
                 )
-    
+
     # Aggregate results by problem_id (average scores across repeats)
     from collections import defaultdict
     results_by_problem = defaultdict(list)
     for r in results:
         results_by_problem[r["problem_id"]].append(r)
-    
+
     aggregated_results = {}
     for problem_id, runs in results_by_problem.items():
         avg_score = sum(r["score"] for r in runs) / len(runs)
@@ -238,7 +239,7 @@ def main():
         for v in verdicts:
             verdict_counts[v] = verdict_counts.get(v, 0) + 1
         majority_verdict = max(verdict_counts, key=verdict_counts.get)
-        
+
         aggregated_results[problem_id] = {
             "problem_id": problem_id,
             "verdict": majority_verdict,
@@ -248,7 +249,7 @@ def main():
             "individual_scores": [r["score"] for r in runs],
             "error": runs[0].get("error"),  # Keep first error if any
         }
-    
+
     # Compute statistics (on aggregated results)
     num_problems = len(aggregated_results)
     scores = [r["score"] for r in aggregated_results.values()]
@@ -256,8 +257,8 @@ def main():
     incorrect = sum(1 for r in aggregated_results.values() if r["verdict"] == "INCORRECT")
     unknown = sum(1 for r in aggregated_results.values() if r["verdict"] == "UNKNOWN")
     errors = sum(1 for r in aggregated_results.values() if r["error"])
-    
-    print(f"\n📊 Results:")
+
+    print("\n📊 Results:")
     print(f"   Problems: {num_problems}")
     if args.num_repeats > 1:
         print(f"   Total judgments: {len(results)} ({args.num_repeats} repeats × {num_problems} problems)")
@@ -266,7 +267,7 @@ def main():
     print(f"   Unknown: {unknown}")
     print(f"   Errors: {errors}")
     print(f"   Mean Score: {sum(scores)/len(scores):.4f}")
-    
+
     # Save results
     output_path = args.output or str(input_path).replace(".json", "_judged.json")
     output_data = {
@@ -283,10 +284,10 @@ def main():
         },
         "results": aggregated_results,
     }
-    
+
     with open(output_path, "w") as f:
         json.dump(output_data, f, indent=2, ensure_ascii=False)
-    
+
     print(f"\n💾 Saved to: {output_path}")
 
 

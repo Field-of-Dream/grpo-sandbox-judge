@@ -5,9 +5,6 @@
 包括函数名称和参数。
 """
 
-import re
-from typing import Dict
-import shlex
 
 
 class Action:
@@ -17,7 +14,7 @@ class Action:
       - parameters: 参数字典，参数名到值的映射
     """
 
-    def __init__(self, function_name: str, parameters: Dict[str, str], function_id: str = None):
+    def __init__(self, function_name: str, parameters: dict[str, str], function_id: str = None):
         """
         初始化动作。
 
@@ -34,7 +31,7 @@ class Action:
         """返回动作的字符串表示。"""
         return str(self.to_dict())
 
-    def to_dict(self) -> Dict[str, object]:
+    def to_dict(self) -> dict[str, object]:
         """
         将动作转换为字典格式，用于序列化。
 

@@ -4,13 +4,12 @@ Kaggle 运行时模块 - 在 Kaggle 环境中执行命令
 本模块提供 KaggleRuntime 类，替代 DockerRuntime 用于 Kaggle 环境。
 """
 
+import contextlib
+import logging
 import os
-import re
+import shutil
 import subprocess
 import tempfile
-import shutil
-from typing import Tuple, Optional
-import logging
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -28,7 +27,7 @@ def get_logger(name: str) -> logging.Logger:
 class KaggleRuntime:
     """
     Kaggle 运行时 - 在 Kaggle Notebook 环境中执行命令。
-    
+
     替代 DockerRuntime，核心功能：
     1. 执行 Python/bash 命令
     2. 文件操作
@@ -44,7 +43,7 @@ class KaggleRuntime:
         os.makedirs(working_dir, exist_ok=True)
         os.makedirs(os.path.join(working_dir, "input"), exist_ok=True)
         os.makedirs(os.path.join(working_dir, "output"), exist_ok=True)
-        
+
         if logger is None:
             self.logger = get_logger("KaggleRuntime")
         elif logger is False:
@@ -58,8 +57,8 @@ class KaggleRuntime:
             self.logger.setLevel(logging.WARNING)
         else:
             self.logger = logger
-        
-        self.logger.info(f"Kaggle environment initialized")
+
+        self.logger.info("Kaggle environment initialized")
         self.logger.info(f"Working directory: {self.working_dir}")
 
     def run(
@@ -67,20 +66,20 @@ class KaggleRuntime:
         code: str,
         timeout: int = 60,
         workdir: str = None,
-    ) -> Tuple[str, str]:
+    ) -> tuple[str, str]:
         """
         执行命令。
-        
+
         Args:
             code: 要执行的 bash 命令
             timeout: 超时时间（秒）
             workdir: 工作目录
-            
+
         Returns:
             (output, exit_code) - 命令输出和退出码
         """
         exec_workdir = self.working_dir if workdir is None else workdir
-        
+
         try:
             result = subprocess.run(
                 ["bash", "-c", code],
@@ -90,32 +89,32 @@ class KaggleRuntime:
                 timeout=timeout,
             )
             output = result.stdout + result.stderr
-            
+
             if result.returncode != 0:
                 return output, f"Error: Exit code {result.returncode}"
-            
+
             return output, str(result.returncode)
-            
+
         except subprocess.TimeoutExpired:
             return f"The command took too long to execute (>{timeout}s)", "-1"
         except Exception as e:
             return f"Error: {repr(e)}", "-1"
 
-    def run_python(self, code: str, timeout: int = 60) -> Tuple[str, int]:
+    def run_python(self, code: str, timeout: int = 60) -> tuple[str, int]:
         """
         执行 Python 代码。
-        
+
         Args:
             code: Python 代码
             timeout: 超时时间（秒）
-            
+
         Returns:
             (output, exit_code)
         """
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
             f.write(code)
             temp_path = f.name
-        
+
         try:
             result = subprocess.run(
                 ['python', temp_path],
@@ -130,10 +129,8 @@ class KaggleRuntime:
         except Exception as e:
             return f"Error: {repr(e)}", -1
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(temp_path)
-            except OSError:
-                pass
 
     def copy_to_container(self, src_path: str, dest_path: str):
         """复制文件到工作目录"""
@@ -183,6 +180,6 @@ class KaggleRuntime:
     def close(self):
         """清理临时文件"""
         pass
-    
+
     def __del__(self):
         pass

@@ -21,14 +21,16 @@ Usage:
     results = train(config)
 """
 
-import os
+import contextlib
 import json
-import random
 import logging
+import os
+import random
 import tempfile
-from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Tuple, Union, Callable
-import threading
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 from transformers import AutoTokenizer
 from unsloth import FastLanguageModel
@@ -132,7 +134,7 @@ class RLHFTrainingConfig:
     lora_rank: int = 16
     lora_alpha: int = 16
     lora_dropout: float = 0.0
-    target_modules: Optional[List[str]] = None  # Auto-detect if None
+    target_modules: list[str] | None = None  # Auto-detect if None
 
     # Optimizer settings
     learning_rate: float = 5e-6
@@ -240,17 +242,17 @@ class ProductManager:
         results = train(config, product_manager=pm)
     """
 
-    def __init__(self, task_templates: Optional[List[str]] = None):
+    def __init__(self, task_templates: list[str] | None = None):
         """Initialize ProductManager.
 
         Args:
             task_templates: Optional list of custom prompt templates.
                           If None or empty, uses default Chinese QA templates.
         """
-        self.task_templates: List[str] = task_templates if task_templates is not None else []
+        self.task_templates: list[str] = task_templates if task_templates is not None else []
         self.num_generated = 0
-        self._custom_system_prompt: Optional[str] = None
-        self._default_templates: List[str] = [
+        self._custom_system_prompt: str | None = None
+        self._default_templates: list[str] = [
             "作为QA工程师，请测试以下功能：用户登录系统，包括正常登录、密码错误、账户锁定等场景。",
             "请进行回归测试：订单创建功能，验证库存扣减、支付流程、订单状态流转。",
             "执行API测试：用户管理接口，测试创建、查询、更新、删除用户的各项操作。",
@@ -264,14 +266,14 @@ class ProductManager:
         """Add a custom task prompt template."""
         self.task_templates.append(template)
 
-    def add_task_templates(self, templates: List[str]) -> None:
+    def add_task_templates(self, templates: list[str]) -> None:
         """Add multiple custom task prompt templates."""
         self.task_templates.extend(templates)
 
     @classmethod
     def from_file(cls, file_path: str) -> "ProductManager":
         """Create ProductManager from a file containing prompts."""
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(file_path, encoding="utf-8") as f:
             templates = [line.strip() for line in f if line.strip()]
         return cls(task_templates=templates)
 
@@ -281,7 +283,7 @@ class ProductManager:
         templates = self.task_templates if self.task_templates else self._default_templates
         return random.choice(templates)
 
-    def format_prompt(self, task: str, system_prompt: Optional[str] = None) -> List[Dict[str, str]]:
+    def format_prompt(self, task: str, system_prompt: str | None = None) -> list[dict[str, str]]:
         """Format task as chat messages."""
         default_system = "你是一个专业的QA工程师，负责执行测试任务。"
         # Priority: parameter > _custom_system_prompt > default
@@ -296,7 +298,7 @@ class ProductManager:
         self._custom_system_prompt = system_prompt
 
     @property
-    def templates(self) -> List[str]:
+    def templates(self) -> list[str]:
         """Get all available templates."""
         return self.task_templates if self.task_templates else self._default_templates
 
@@ -312,8 +314,8 @@ class ProductManager:
         """
         try:
             from datasets import Dataset
-        except ImportError:
-            raise ImportError("datasets library required. Install with: pip install datasets")
+        except ImportError as e:
+            raise ImportError("datasets library required. Install with: pip install datasets") from e
 
         templates = self.task_templates if self.task_templates else self._default_templates
         # Use from_list to create dataset from list of prompts (each prompt is a row)
@@ -380,15 +382,12 @@ class RewardModel:
         if "测试" in task_lower or "test" in task_lower:
             test_keywords = ["测试", "验证", "检查", "用例", "场景", "步骤", "test case"]
             score += min(sum(1 for kw in test_keywords if kw in response_lower) * 2, 20)
-        if "登录" in task_lower:
-            if any(kw in response_lower for kw in ["正常登录", "密码错误", "username", "password"]):
-                score += 15
-        if "回归" in task_lower:
-            if any(kw in response_lower for kw in ["订单", "库存", "支付", "状态"]):
-                score += 15
-        if "API" in task_lower:
-            if any(kw in response_lower for kw in ["POST", "GET", "PUT", "DELETE", "接口", "endpoint"]):
-                score += 15
+        if "登录" in task_lower and any(kw in response_lower for kw in ["正常登录", "密码错误", "username", "password"]):
+            score += 15
+        if "回归" in task_lower and any(kw in response_lower for kw in ["订单", "库存", "支付", "状态"]):
+            score += 15
+        if "API" in task_lower and any(kw in response_lower for kw in ["POST", "GET", "PUT", "DELETE", "接口", "endpoint"]):
+            score += 15
         if len(response) > 100:
             score += 10
         if len(response) > 300:
@@ -407,12 +406,12 @@ class RewardModel:
             test_code = self._extract_test_code(qa_output)
             if not test_code:
                 return 0.5
-            
+
             # Use tempfile to avoid file path conflicts in parallel execution
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
                 test_file = f.name
                 f.write(test_code)
-            
+
             try:
                 output, exit_code = self.runtime.run(f"python -m pytest {test_file} -v 2>&1 | head -50")
                 if exit_code == 0:
@@ -435,20 +434,20 @@ class RewardModel:
         import_lines = []
         test_lines = []
         in_test = False
-        
+
         # First pass: collect import lines
         for line in lines:
             stripped = line.strip()
             if stripped.startswith("import ") or stripped.startswith("from "):
                 import_lines.append(line)
-        
+
         # Second pass: collect test functions/classes
         for line in lines:
             if "def test_" in line or "class Test" in line:
                 in_test = True
             if in_test:
                 test_lines.append(line)
-        
+
         if test_lines:
             # Build code with imports first, then test code
             code_parts = []
@@ -478,7 +477,7 @@ class GRPOSandboxRewardFunc:
         self.reward_model = reward_model
         self.task_prefix = task_prefix
 
-    def __call__(self, completions: List[str], prompts: List[str]) -> List[float]:
+    def __call__(self, completions: list[str], prompts: list[str]) -> list[float]:
         """Compute rewards for completions.
 
         Args:
@@ -489,7 +488,7 @@ class GRPOSandboxRewardFunc:
             List of reward scores (float between 0 and 1)
         """
         rewards = []
-        for completion, prompt in zip(completions, prompts):
+        for completion, prompt in zip(completions, prompts, strict=False):
             # Extract task from prompt (remove task_prefix if present)
             task = prompt
             if self.task_prefix in prompt:
@@ -506,7 +505,7 @@ class CodeExecutor:
         self.working_dir = working_dir
         os.makedirs(working_dir, exist_ok=True)
 
-    def run(self, code: str, timeout: int = 30) -> Tuple[str, int]:
+    def run(self, code: str, timeout: int = 30) -> tuple[str, int]:
         import subprocess
         import tempfile
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
@@ -520,20 +519,18 @@ class CodeExecutor:
         except Exception as e:
             return f"Error: {repr(e)}", -1
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(temp_path)
-            except OSError:
-                pass
 
 
 def _create_reward_func_from_rm(
     reward_model: RewardModel,
-) -> Callable[[List[str], List[str]], List[float]]:
+) -> Callable[[list[str], list[str]], list[float]]:
     """Create a reward function compatible with GRPOTrainer from a RewardModel instance."""
 
-    def reward_func(completions: List[str], prompts: List[str]) -> List[float]:
+    def reward_func(completions: list[str], prompts: list[str]) -> list[float]:
         rewards = []
-        for completion, prompt in zip(completions, prompts):
+        for completion, prompt in zip(completions, prompts, strict=False):
             task = prompt.strip()
             reward = reward_model.score(task, completion)
             rewards.append(reward)
@@ -557,11 +554,11 @@ def _load_model_and_tokenizer(config: RLHFTrainingConfig):
         config.model_name_or_path,
         trust_remote_code=True,
     )
-    
+
     # Ensure tokenizer has pad_token (required for training)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    
+
     # Ensure padding side is set for training
     tokenizer.padding_side = "left"
 
@@ -612,8 +609,8 @@ def _create_grpo_config(config: RLHFTrainingConfig):
     """Create TRL GRPOConfig from RLHFTrainingConfig."""
     try:
         from trl import GRPOConfig
-    except ImportError:
-        raise ImportError("trl library required. Install with: pip install trl")
+    except ImportError as e:
+        raise ImportError("trl library required. Install with: pip install trl") from e
 
     max_prompt_length = config.max_seq_length // 2
     max_completion_length = config.max_seq_length - max_prompt_length
@@ -664,9 +661,9 @@ def _create_grpo_config(config: RLHFTrainingConfig):
 
 def train(
     config: RLHFTrainingConfig,
-    product_manager: Optional[ProductManager] = None,
-    reward_model: Optional[RewardModel] = None,
-) -> Dict[str, Any]:
+    product_manager: ProductManager | None = None,
+    reward_model: RewardModel | None = None,
+) -> dict[str, Any]:
     """Run GRPO training using Unsloth's optimized GRPOTrainer.
 
     This function uses TRL's GRPOTrainer with Unsloth's PatchFastRL optimizations
@@ -707,8 +704,8 @@ def train(
 
     try:
         from datasets import Dataset
-    except ImportError:
-        raise ImportError("datasets library required. Install with: pip install datasets")
+    except ImportError as e:
+        raise ImportError("datasets library required. Install with: pip install datasets") from e
 
     templates = pm.task_templates if pm.task_templates else pm._default_templates
     # GRPOTrainer needs 'prompt' field
@@ -733,8 +730,8 @@ def train(
     log.info("Initializing GRPOTrainer...")
     try:
         from trl import GRPOTrainer
-    except ImportError:
-        raise ImportError("trl library required. Install with: pip install trl")
+    except ImportError as e:
+        raise ImportError("trl library required. Install with: pip install trl") from e
 
     trainer = GRPOTrainer(
         model=model,
@@ -827,10 +824,10 @@ class ReplayBuffer:
 
     def __init__(self, max_size: int = 10000):
         self.max_size = max_size
-        self.buffer: List[Dict[str, Any]] = []
-        self.advantages: List[float] = []
+        self.buffer: list[dict[str, Any]] = []
+        self.advantages: list[float] = []
 
-    def add(self, trajectory: Dict[str, Any], reward: float):
+    def add(self, trajectory: dict[str, Any], reward: float):
         """Add a trajectory to the buffer."""
         self.buffer.append(trajectory)
         self.advantages.append(reward)
@@ -838,7 +835,7 @@ class ReplayBuffer:
             self.buffer.pop(0)
             self.advantages.pop(0)
 
-    def compute_advantages(self, baseline: Optional[float] = None) -> List[float]:
+    def compute_advantages(self, baseline: float | None = None) -> list[float]:
         """Compute advantages using mean rewards as baseline."""
         if not self.advantages:
             return []
@@ -851,7 +848,7 @@ class ReplayBuffer:
             advantages = [(a - mean_adv) / std_adv for a in advantages]
         return advantages
 
-    def sample(self, batch_size: int) -> List[Dict[str, Any]]:
+    def sample(self, batch_size: int) -> list[dict[str, Any]]:
         """Sample a batch from the buffer."""
         if len(self.buffer) <= batch_size:
             return self.buffer.copy()
@@ -885,15 +882,15 @@ class GRPOOptimizer:
         self.scheduler = torch.optim.lr_scheduler.LinearLR(self.optimizer, start_factor=1.0, end_factor=0.1, total_iters=100)
         self.reference_model = ReferenceModel(model, tokenizer)
 
-    def compute_grpo_loss(self, input_ids, attention_mask, response_ids, advantages: List[float]):
+    def compute_grpo_loss(self, input_ids, attention_mask, response_ids, advantages: list[float]):
         """Compute GRPO loss."""
         torch = self.torch
-        F = torch.nn.functional
+        f = torch.nn.functional
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=response_ids)
         policy_logits = outputs.logits
         response_logits = policy_logits[:, :-1, :]
         response_labels = response_ids[:, 1:]
-        log_probs = F.log_softmax(response_logits, dim=-1)
+        log_probs = f.log_softmax(response_logits, dim=-1)
         selected_log_probs = log_probs.gather(2, response_labels.unsqueeze(2)).squeeze(2)
         response_mask = attention_mask[:, 1:].float()
         policy_log_probs = (selected_log_probs * response_mask).sum(dim=-1) / (response_mask.sum(dim=-1) + 1e-8)
@@ -911,7 +908,7 @@ class GRPOOptimizer:
         }
         return total_loss, metrics
 
-    def step(self, input_ids, attention_mask, response_ids, advantages: List[float]) -> Dict[str, float]:
+    def step(self, input_ids, attention_mask, response_ids, advantages: list[float]) -> dict[str, float]:
         torch = self.torch
         loss, metrics = self.compute_grpo_loss(input_ids, attention_mask, response_ids, advantages)
         self.optimizer.zero_grad()

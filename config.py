@@ -5,9 +5,10 @@ Provides functions to load and manage prompt templates and agent configurations.
 """
 
 import os
-from typing import Dict, Any, Optional
+from dataclasses import dataclass
+from typing import Any
+
 import yaml
-from dataclasses import dataclass, field
 
 
 @dataclass
@@ -20,20 +21,20 @@ class AgentConfig:
     output_dir: str = "/testbed/output"
     max_steps: int = 30
     max_token_limit: int = 65536
-    extra_body: Optional[Dict[str, Any]] = None
-    
+    extra_body: dict[str, Any] | None = None
+
     def format_system_prompt(self, **kwargs) -> str:
         return self.system_prompt.format(**kwargs)
-    
+
     def format_instance_prompt(self, **kwargs) -> str:
         return self.instance_prompt.format(**kwargs)
 
 
 def load_prompt_config(config_path: str) -> AgentConfig:
     """Load prompt configuration from YAML file."""
-    with open(config_path, "r", encoding="utf-8") as f:
+    with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
-    
+
     return AgentConfig(
         system_prompt=config.get("system_prompt", ""),
         instance_prompt=config.get("instance_prompt", ""),
@@ -49,7 +50,7 @@ def get_default_config_path() -> str:
     return os.path.join(base_dir, "config", "general.yaml")
 
 
-def load_config(config_path: Optional[str] = None) -> AgentConfig:
+def load_config(config_path: str | None = None) -> AgentConfig:
     """Load configuration from path or use default."""
     if config_path is None:
         config_path = get_default_config_path()
