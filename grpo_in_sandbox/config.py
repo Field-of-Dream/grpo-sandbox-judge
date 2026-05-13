@@ -23,10 +23,10 @@ class AgentConfig:
     max_token_limit: int = 65536
     extra_body: dict[str, Any] | None = None
 
-    def format_system_prompt(self, **kwargs) -> str:
+    def format_system_prompt(self, **kwargs: Any) -> str:
         return self.system_prompt.format(**kwargs)
 
-    def format_instance_prompt(self, **kwargs) -> str:
+    def format_instance_prompt(self, **kwargs: Any) -> str:
         return self.instance_prompt.format(**kwargs)
 
 
