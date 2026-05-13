@@ -61,6 +61,7 @@ def get_logger(name: str) -> logging.Logger:
 
 logger = get_logger(__name__)
 
+
 # Configuration dataclass
 @dataclass
 class AgentArgs:
@@ -605,7 +606,7 @@ class Agent:
                     if end != -1 and (end < start or end > total_lines):
                         return f"Error: Invalid view_range {view_range}: end must be >= start and <= {total_lines}, or -1 to view until end."
 
-                    sliced_lines = lines[start-1:] if end == -1 else lines[start-1:end]
+                    sliced_lines = lines[start - 1:] if end == -1 else lines[start - 1:end]
                     numbered = "\n".join(f"{i + start:6}\t{line}" for i, line in enumerate(sliced_lines))
                 else:
                     numbered = "\n".join(f"{i + 1:6}\t{line}" for i, line in enumerate(lines))

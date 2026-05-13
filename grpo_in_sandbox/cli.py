@@ -17,10 +17,10 @@ import json
 import os
 import subprocess
 import sys
-from typing import Any
 import warnings
 from importlib import resources
 from pathlib import Path
+from typing import Any
 
 import docker
 import fire
@@ -670,7 +670,6 @@ def config(
         llm-in-sandbox config --set-llm-name openai/gpt-4o
         llm-in-sandbox config --init
     """
-    logger = get_logger("llm-in-sandbox")
     config_path = Path.home() / ".grpo-in-sandbox" / "config.yaml"
 
     # 加载现有配置
@@ -810,10 +809,7 @@ def config(
                 runtime_val, location = load_runtime_settings()
                 if key in runtime_val and runtime_val[key]:
                     value = runtime_val[key]
-                    if location:
-                        source = f"配置文件 {location}"
-                    else:
-                        source = "默认值"
+                    source = f"配置文件 {location}" if location else "默认值"
 
             # 处理敏感值（如api_key）
             display_value = value if value else "(未设置)"

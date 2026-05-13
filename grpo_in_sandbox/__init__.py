@@ -16,7 +16,6 @@ Usage:
 
 __version__ = "0.2.0"
 
-# 运行时常量（单一定义源: runtime.py）
 from .agent import Agent, AgentArgs
 from .agent_configs import (
     DEFAULT_TEAM_TEMPLATES,
@@ -38,8 +37,6 @@ from .runtime import (
     LocalRuntime,
     create_runtime,
 )
-
-# When installed as py_modules (root-level files), imports need to be explicit
 from .train import (
     CodeExecutor,
     ProductManager,
