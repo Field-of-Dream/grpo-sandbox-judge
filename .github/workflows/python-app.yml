@@ -23,7 +23,7 @@ jobs:
           pip install -e ".[dev]"
       # Type checking with mypy
       - name: Type checking
-        run: mypy . --exclude '(benchmark|build|dist|logs_68575702206|\.venv)'
+        run: mypy . --exclude benchmark/ --exclude build/ --exclude dist/ --exclude 'logs_*' --exclude .venv/
       # Linting with ruff
       - name: Lint with ruff
         run: ruff check .
