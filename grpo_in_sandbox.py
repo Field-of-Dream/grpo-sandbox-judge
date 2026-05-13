@@ -1,7 +1,7 @@
 # This is a facade module that re-exports everything from individual modules
 # It allows: from grpo_in_sandbox import train, Agent, etc.
 
-from __init__ import *  # noqa: F401, F403
+from grpo_in_sandbox import *  # noqa: F401, F403
 
 __all__ = [  # noqa: F405
     "__version__",

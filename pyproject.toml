@@ -55,6 +55,10 @@ training = [
 Homepage = "https://github.com/Field-of-Dream/-grpo-sandbox-judge"
 Repository = "https://github.com/Field-of-Dream/-grpo-sandbox-judge"
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["grpo_in_sandbox*"]
+
 [tool.setuptools.package-data]
 grpo_in_sandbox = ["config/*.yaml", "benchmark/**/*"]
 

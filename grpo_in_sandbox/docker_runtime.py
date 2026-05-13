@@ -10,7 +10,7 @@ import tarfile
 
 import docker
 
-from __init__ import CMD_TIMEOUT, DOCKER_PATH
+from . import CMD_TIMEOUT, DOCKER_PATH
 
 
 def get_logger(name: str) -> logging.Logger:

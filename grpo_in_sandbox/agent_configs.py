@@ -6,7 +6,7 @@ from typing import Any
 
 import yaml
 
-from agent import Agent, AgentArgs
+from .agent import Agent, AgentArgs
 
 logger = logging.getLogger(__name__)
 

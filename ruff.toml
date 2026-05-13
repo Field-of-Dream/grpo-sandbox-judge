@@ -22,8 +22,8 @@ ignore = [
 ]
 
 [lint.per-file-ignores]
-"__init__.py" = ["F401", "F403"]
-"benchmark/*" = ["E501", "N802", "N803"]
+"**/__init__.py" = ["F401", "F403"]
+"**/benchmark/*" = ["E501", "N802", "N803"]
 "tests/*" = ["B011", "C901"]
 
 [lint.isort]

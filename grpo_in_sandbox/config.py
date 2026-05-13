@@ -46,7 +46,7 @@ def load_prompt_config(config_path: str) -> AgentConfig:
 
 def get_default_config_path() -> str:
     """Get default prompt config path."""
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    base_dir = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_dir, "config", "general.yaml")
 
 

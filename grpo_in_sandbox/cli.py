@@ -29,8 +29,8 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
-from agent import Agent, AgentArgs, get_logger
-from docker_runtime import DockerRuntime
+from .agent import Agent, AgentArgs, get_logger
+from .docker_runtime import DockerRuntime
 
 # 抑制来自litellm的pydantic序列化警告
 warnings.filterwarnings("ignore", message="Pydantic serializer warnings")

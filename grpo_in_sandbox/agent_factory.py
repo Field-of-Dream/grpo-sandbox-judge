@@ -4,7 +4,7 @@ This module re-exports factory functions from grpo_in_sandbox.agent for
 backward compatibility. New code should import directly from agent module.
 """
 
-from grpo_in_sandbox.agent import (
+from .agent import (
     Agent,
     AgentArgs,
     AgentRegistry,

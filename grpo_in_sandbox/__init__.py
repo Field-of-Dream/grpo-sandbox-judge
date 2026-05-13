@@ -17,8 +17,8 @@ Usage:
 __version__ = "0.2.0"
 
 # 运行时常量（单一定义源: runtime.py）
-from agent import Agent, AgentArgs
-from agent_configs import (
+from .agent import Agent, AgentArgs
+from .agent_configs import (
     DEFAULT_TEAM_TEMPLATES,
     AgentProfile,
     AgentTeam,
@@ -28,8 +28,8 @@ from agent_configs import (
     run_agent_team,
     save_team_to_yaml,
 )
-from config import AgentConfig, load_config
-from runtime import (
+from .config import AgentConfig, load_config
+from .runtime import (
     CMD_TIMEOUT,
     DOCKER_PATH,
     BaseRuntime,
@@ -40,14 +40,14 @@ from runtime import (
 )
 
 # When installed as py_modules (root-level files), imports need to be explicit
-from train import (
+from .train import (
     CodeExecutor,
     ProductManager,
     RewardModel,
     RLHFTrainingConfig,
     train,
 )
-from trajectory import Trajectory, TrajectoryStep
+from .trajectory import Trajectory, TrajectoryStep
 
 __all__ = [
     "train",

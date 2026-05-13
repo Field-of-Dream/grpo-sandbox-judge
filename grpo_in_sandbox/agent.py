@@ -24,9 +24,9 @@ from rich.logging import RichHandler
 from rich.markup import escape
 from rich.panel import Panel
 
-from action import Action
-from tools import execute_bash_tool, str_replace_editor_tool, submit_tool
-from trajectory import Trajectory, TrajectoryStep
+from .action import Action
+from .tools import execute_bash_tool, str_replace_editor_tool, submit_tool
+from .trajectory import Trajectory, TrajectoryStep
 
 litellm.drop_params = True
 
