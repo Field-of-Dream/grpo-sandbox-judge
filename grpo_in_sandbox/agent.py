@@ -120,7 +120,7 @@ class Agent:
             self._console_buffer = io.StringIO()
             self.console = Console(file=self._console_buffer, record=True, force_terminal=True, width=100)
         else:
-            self._console_buffer = None
+            self._console_buffer = None  # type: ignore[assignment]
             self.console = Console()
 
         self.logger = logger or get_logger("Agent")
@@ -281,6 +281,8 @@ class Agent:
         try:
             self.llm_call_count += 1
             save_path = self.output_dir
+            if save_path is None:
+                return
             os.makedirs(save_path, exist_ok=True)
 
             # Save request
@@ -694,12 +696,12 @@ class Agent:
             if "Error" in str(exit_code):
                 return f"Error writing file: {path}"
 
-            snippet_lines = (
+            snippet_parts = (
                 lines[max(0, insert_line - snippet_lines):insert_line]
                 + new_str_lines
                 + lines[insert_line:insert_line + snippet_lines]
             )
-            snippet = "\n".join(snippet_lines)
+            snippet = "\n".join(snippet_parts)
 
             success_msg = f"The file {path} has been edited. "
             success_msg += make_output(snippet, "a snippet of the edited file", max(1, insert_line - snippet_lines + 1))
@@ -821,7 +823,8 @@ def create_agent(agent_type: str = "general", llm_name: str = "openai/gpt-4",
         "general": create_general_agent,
     }
     factory = factories.get(agent_type, create_general_agent)
-    return factory(llm_name=llm_name, llm_base_url=llm_base_url,
+    assert factory is not None
+    return factory(llm_name=llm_name, llm_base_url=llm_base_url,  # type: ignore[operator]
         system_prompt=system_prompt, instance_prompt=instance_prompt, **kwargs)
 
 

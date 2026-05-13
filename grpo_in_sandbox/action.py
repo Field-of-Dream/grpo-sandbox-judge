@@ -5,6 +5,7 @@
 包括函数名称和参数。
 """
 
+from typing import Any
 
 
 class Action:
@@ -14,7 +15,7 @@ class Action:
       - parameters: 参数字典，参数名到值的映射
     """
 
-    def __init__(self, function_name: str, parameters: dict[str, str], function_id: str | None = None):
+    def __init__(self, function_name: str, parameters: dict[str, Any], function_id: str | None = None):
         """
         初始化动作。
 

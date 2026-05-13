@@ -22,8 +22,8 @@ class Observation:
         stderr: 标准错误（分离后）
     """
 
-    def __init__(self, bash_output, error_code, action: Action, num_lines: int = 40,
-                 stdout: str = None, stderr: str = None):
+    def __init__(self, bash_output: str, error_code: int, action: Action, num_lines: int = 40,
+                 stdout: str | None = None, stderr: str | None = None):
         """
         初始化观察结果。
 

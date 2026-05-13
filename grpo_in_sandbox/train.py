@@ -882,7 +882,7 @@ class GRPOOptimizer:
         self.scheduler = torch.optim.lr_scheduler.LinearLR(self.optimizer, start_factor=1.0, end_factor=0.1, total_iters=100)
         self.reference_model = ReferenceModel(model, tokenizer)
 
-    def compute_grpo_loss(self, input_ids, attention_mask, response_ids, advantages: list[float]):
+    def compute_grpo_loss(self, input_ids, attention_mask, response_ids, advantages: list[float]) -> tuple[torch.Tensor, dict[str, float]]:
         """Compute GRPO loss."""
         torch = self.torch
         f = torch.nn.functional

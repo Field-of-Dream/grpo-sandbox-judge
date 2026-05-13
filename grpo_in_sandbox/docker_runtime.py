@@ -33,7 +33,7 @@ class DockerRuntime:
         docker_image: str,
         repo_path: str = "/testbed",
         command: str = "sleep infinity",
-        logger=None,
+        logger: logging.Logger | None = None,
         **docker_kwargs,
     ):
         self.docker_image = docker_image
@@ -64,6 +64,7 @@ class DockerRuntime:
         self.setup_env()
         self.logger.info("Docker environment initialized")
         self.logger.info(f"Docker image: {self.docker_image}")
+        assert self.container is not None, "Container failed to start"
         self.logger.info(f"Container ID: {self.container.id}")
 
     @staticmethod
@@ -78,6 +79,7 @@ class DockerRuntime:
     def start_container(self, docker_image: str, command: str, container_name: str, **docker_kwargs):
         try:
             self.container = self.client.containers.get(container_name)
+            assert self.container is not None
             self.logger.info(f"Found existing container: {container_name}")
             if self.container.status != "running":
                 self.container.start()
@@ -126,13 +128,14 @@ class DockerRuntime:
         self,
         code: str,
         timeout: int = CMD_TIMEOUT,
-        workdir: str = None,
+        workdir: str | None = None,
     ) -> tuple[str, str]:
         """在容器中执行命令（组合输出模式）。"""
         exec_workdir = self.repo_path if workdir is None else workdir
         command = ["bash", "-c", f"timeout {timeout} bash -c {shlex.quote(code)}"]
 
         try:
+            assert self.container is not None
             exec_result = self.container.exec_run(
                 command,
                 workdir=exec_workdir,
@@ -163,13 +166,14 @@ class DockerRuntime:
         self,
         code: str,
         timeout: int = CMD_TIMEOUT,
-        workdir: str = None,
+        workdir: str | None = None,
     ) -> tuple[str, str, str]:
         """在容器中执行命令（分离输出模式）。"""
         exec_workdir = self.repo_path if workdir is None else workdir
         command = ["bash", "-c", f"timeout {timeout} bash -c {shlex.quote(code)}"]
 
         try:
+            assert self.container is not None
             exec_result = self.container.exec_run(
                 command,
                 workdir=exec_workdir,
@@ -213,6 +217,7 @@ class DockerRuntime:
             tar.add(src_path, arcname=os.path.basename(dest_path))
         tar_stream.seek(0)
 
+        assert self.container is not None
         self.container.put_archive(dest_dir or "/", tar_stream)
         self.logger.info(f"Copied {src_path} to {dest_path}")
 
@@ -226,6 +231,7 @@ class DockerRuntime:
                 tar.add(item_path, arcname=item)
         tar_stream.seek(0)
 
+        assert self.container is not None
         self.container.put_archive(dest_dir, tar_stream)
         self.logger.info(f"Copied directory {src_dir} to {dest_dir}")
 
@@ -239,6 +245,7 @@ class DockerRuntime:
         """
         try:
             # 从容器获取存档
+            assert self.container is not None
             bits, stat = self.container.get_archive(container_path)
 
             # 创建本地目录

@@ -89,6 +89,8 @@ def load_reward_function(task_name: str) -> Callable:
         raise FileNotFoundError(f"未找到评分函数：{reward_path}")
 
     spec = importlib.util.spec_from_file_location("reward", reward_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法加载 reward 模块: {reward_path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
@@ -116,6 +118,8 @@ def load_prompt_function(task_name: str) -> Callable:
         return lambda problem_data: problem_data['problem_statement']
 
     spec = importlib.util.spec_from_file_location("vanilla_llm_prompt", prompt_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法加载 prompt 模块: {prompt_path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
@@ -183,13 +187,13 @@ def create_agent_runner(
     temperature: float,
     max_token_limit: int,
     max_tokens_per_call: int,
-    extra_body: dict = None,
-    task_system_prompt: str = None,
-    task_instance_prompt: str = None,
+    extra_body: dict | None = None,
+    task_system_prompt: str | None = None,
+    task_instance_prompt: str | None = None,
     save_litellm_response: bool = False,
-    working_dir: str = None,
-    input_dir: str = None,
-    output_dir: str = None,
+    working_dir: str | None = None,
+    input_dir: str | None = None,
+    output_dir: str | None = None,
     **kwargs,  # 忽略额外参数（如仅用于vanilla LLM的max_response_len）
 ) -> Callable:
     """
@@ -244,7 +248,7 @@ def create_agent_runner(
         """
         runtime = DockerRuntime(
             docker_image=docker_image,
-            repo_path=working_dir,
+            repo_path=working_dir or "/testbed",
             logger=logger,
         )
 
@@ -260,7 +264,7 @@ def create_agent_runner(
                     continue
                 temp_path = Path(temp_dir) / filename
                 temp_path.write_text(content)
-            runtime.copy_dir_to_container(temp_dir, input_dir)
+            runtime.copy_dir_to_container(temp_dir, str(input_dir))
 
         try:
             # 如果提供了任务特定的提示词则使用，否则使用general.yaml默认值
@@ -269,7 +273,7 @@ def create_agent_runner(
                 instance_prompt = task_instance_prompt or ""
             else:
                 config_path = get_default_config_path()
-                config = load_prompt_config(config_path)
+                config = load_prompt_config(str(config_path))
                 system_prompt = config.get("system_prompt", "")
                 instance_prompt = config.get("instance_prompt", "")
 
@@ -306,7 +310,7 @@ def create_agent_runner(
                 pass
 
             # 返回答案、轨迹和控制台输出
-            return answer, trajectory, console_output
+            return answer, trajectory, console_output  # type: ignore[return-value]
 
         finally:
             # 注销atexit，因为我们正在正常清理
@@ -585,8 +589,8 @@ def run_benchmark(
     agent_config: dict,
     output_dir: str,
     num_workers: int = 1,
-    start_id: int = None,
-    end_id: int = None,
+    start_id: int | None = None,
+    end_id: int | None = None,
     mode: str = "llm-in-sandbox",
 ) -> dict:
     """
@@ -821,7 +825,7 @@ def run_benchmark(
     console.print()
     console.print(f"[bold]📊 结果：{task_name}[/bold]")
     console.print(f"   平均评分：[green]{stats['mean_score']:.4f}[/green]")
-    console.print(f"   错误数：[red]{stats['num_errors']}[/red]" if stats['num_errors'] > 0 else "   错误数：0")
+    console.print(f"   错误数：[red]{stats['num_errors']}[/red]" if stats['num_errors'] > 0 else "   错误数：0")  # type: ignore[operator]
     console.print(f"   总时间：{elapsed_str}")
     console.print(f"   输出：{output_dir}")
 

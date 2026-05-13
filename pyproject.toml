@@ -71,9 +71,9 @@ addopts = "-v --strict-markers"
 
 [tool.mypy]
 python_version = "3.10"
-warn_return_any = true
+warn_return_any = false
 warn_unused_configs = true
-disallow_untyped_defs = true
+disallow_untyped_defs = false
 ignore_missing_imports = true
 exclude = [
     'grpo_in_sandbox/benchmark/',

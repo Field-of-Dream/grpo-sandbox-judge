@@ -65,7 +65,7 @@ class KaggleRuntime:
         self,
         code: str,
         timeout: int = 60,
-        workdir: str = None,
+        workdir: str | None = None,
     ) -> tuple[str, str]:
         """
         执行命令。

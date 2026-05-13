@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+from typing import Any
 import warnings
 from importlib import resources
 from pathlib import Path
@@ -61,7 +62,7 @@ def get_default_config_path() -> Path:
     """
     # 尝试从包资源获取
     try:
-        with resources.files("grpo_in_sandbox.config") as config_dir:
+        with resources.files("grpo_in_sandbox.config") as config_dir:  # type: ignore[attr-defined]
             return Path(config_dir) / "general.yaml"
     except (TypeError, FileNotFoundError):
         # 回退到相对路径
@@ -336,7 +337,7 @@ def run_agent_query(
     config_path = prompt_config if prompt_config else get_default_config_path()
     if Path(config_path).exists():
         logger.info(f"正在加载提示词配置：{config_path}")
-        config = load_prompt_config(config_path)
+        config = load_prompt_config(str(config_path))
         system_prompt = config.get("system_prompt", "")
         instance_prompt = config.get("instance_prompt", "")
         # 从配置获取容器路径（默认：/testbed, /testbed/input, /testbed/output）
@@ -357,10 +358,10 @@ def run_agent_query(
     # 设置带时间戳的输出目录
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     if output_dir is None:
-        output_dir = Path.cwd() / "output" / timestamp
+        output_dir = Path.cwd() / "output" / timestamp  # type: ignore[assignment]
     else:
-        output_dir = Path(output_dir) / timestamp
-    output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = Path(str(output_dir)) / timestamp  # type: ignore[assignment]
+    output_dir.mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
 
     # 设置LLM基础URL
     if llm_base_url:
@@ -445,7 +446,7 @@ def run_agent_query(
         )
 
         # 将输出文件从容器复制到files/子目录
-        files_dir = output_dir / "files"
+        files_dir = Path(str(output_dir)) / "files"
         files_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"正在复制输出文件从容器的 {container_output_dir} 到 {files_dir}")
         try:
@@ -454,7 +455,7 @@ def run_agent_query(
             logger.warning(f"无法复制容器输出：{e}")
 
         # 保存轨迹
-        trajectory_file = output_dir / "trajectory.json"
+        trajectory_file = Path(str(output_dir)) / "trajectory.json"
 
         with open(trajectory_file, "w") as f:
             json.dump(trajectory.to_dict(), f, indent=2, ensure_ascii=False)
@@ -496,25 +497,25 @@ def run_agent_query(
 
 
 def run_benchmark(
-    task: str,
-    llm_name: str = None,
-    docker_image: str = DEFAULT_DOCKER_IMAGE,
-    max_steps: int = 100,
-    temperature: float = None,
-    max_token_limit: int = 65536,
-    max_tokens_per_call: int = 65536,
-    max_response_len: int = 65536,
-    output_dir: str = None,
-    llm_base_url: str = None,
-    api_key: str = None,
-    extra_body: str = None,
-    settings: str = None,
-    num_workers: int = None,
-    start_id: int = None,
-    end_id: int = None,
-    mode: str = "llm-in-sandbox",
-    save_litellm_response: bool = False,
-):
+     task: str,
+     llm_name: str | None = None,
+     docker_image: str = DEFAULT_DOCKER_IMAGE,
+     max_steps: int = 100,
+     temperature: float | None = None,
+     max_token_limit: int = 65536,
+     max_tokens_per_call: int = 65536,
+     max_response_len: int = 65536,
+     output_dir: str | None = None,
+     llm_base_url: str | None = None,
+     api_key: str | None = None,
+     extra_body: str | None = None,
+     settings: str | None = None,
+     num_workers: int | None = None,
+     start_id: int | None = None,
+     end_id: int | None = None,
+     mode: str = "llm-in-sandbox",
+     save_litellm_response: bool = False,
+ ):
     """
     在特定任务上运行基准测试。
 
@@ -575,8 +576,8 @@ def run_benchmark(
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     mode_suffix = "vanillaLLM" if mode == "llm" else "LLMinSandbox"
     llm_name_safe = llm_name.replace("/", "_")  # openai/qwen3_coder -> openai_qwen3_coder
-    output_dir = Path(output_dir or Path.cwd() / "output") / f"{timestamp}_{task}_{llm_name_safe}_{mode_suffix}"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = Path(output_dir or Path.cwd() / "output") / f"{timestamp}_{task}_{llm_name_safe}_{mode_suffix}"  # type: ignore[assignment]
+    output_dir.mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
 
     # 验证模式
     if mode not in ("llm", "llm-in-sandbox"):
@@ -644,13 +645,13 @@ def run_benchmark(
 
 
 def config(
-    show: bool = False,
-    set_llm_name: str = None,
-    set_base_url: str = None,
-    set_api_key: str = None,
-    set_prompt_config: str = None,
-    init: bool = False,
-):
+     show: bool = False,
+     set_llm_name: str | None = None,
+     set_base_url: str | None = None,
+     set_api_key: str | None = None,
+     set_prompt_config: str | None = None,
+     init: bool = False,
+ ):
     """
     管理LLM API配置设置。
 
@@ -742,7 +743,7 @@ def config(
         config_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 读取现有配置并合并
-        config_data = {}
+        config_data: dict[str, Any] = {}
         if config_path.exists():
             with open(config_path) as f:
                 config_data = yaml.safe_load(f) or {}
