@@ -80,3 +80,6 @@ trajectory = agent.run(
     problem_statement="Solve 2+2",
 )
 ```
+
+#需要安装的依赖项
+pip install "docker" "contextlib" "datetime" "dataclasses" "importlib" "pathlib" "fire" "yaml" "transformers" "torch" "tempfile"

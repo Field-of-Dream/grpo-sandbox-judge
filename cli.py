@@ -643,6 +643,191 @@ def run_benchmark(
     return results
 
 
+def config(
+    show: bool = False,
+    set_llm_name: str = None,
+    set_base_url: str = None,
+    set_api_key: str = None,
+    set_prompt_config: str = None,
+    init: bool = False,
+):
+    """
+    管理LLM API配置设置。
+
+    显示或修改存储在 ~/.grpo-in-sandbox/config.yaml 的配置。
+
+    Args:
+        show: 显示当前配置及来源
+        set_llm_name: 设置默认模型名称 (如 openai/gpt-4o-mini)
+        set_base_url: 设置API基础URL (如 https://api.openai.com/v1)
+        set_api_key: 设置API密钥
+        set_prompt_config: 设置提示词配置文件路径
+        init: 初始化配置文件（使用默认值或交互式提示）
+
+    Example:
+        llm-in-sandbox config --show
+        llm-in-sandbox config --set-llm-name openai/gpt-4o
+        llm-in-sandbox config --init
+    """
+    logger = get_logger("llm-in-sandbox")
+    config_path = Path.home() / ".grpo-in-sandbox" / "config.yaml"
+
+    # 加载现有配置
+    existing_config, _ = load_runtime_settings()
+
+    # 初始化模式：创建默认配置
+    if init:
+        # 确保目录存在
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+
+        default_config = {
+            "llm_name": "openai/gpt-4o-mini",
+            "llm_base_url": "https://api.openai.com/v1",
+            # api_key - 不设置默认值，需要用户显式提供
+            # prompt_config - 不设置默认值
+        }
+
+        # 交互式提示用户输入
+        console.print(Panel.fit(
+            "[bold]初始化LLM配置[/bold]\n"
+            f"配置文件将保存到: [cyan]{config_path}[/cyan]",
+            border_style="blue",
+        ))
+
+        # 读取用户输入
+        llm_name = input("模型名称 [openai/gpt-4o-mini]: ").strip()
+        if not llm_name:
+            llm_name = default_config["llm_name"]
+
+        base_url = input("API Base URL [https://api.openai.com/v1]: ").strip()
+        if not base_url:
+            base_url = default_config["llm_base_url"]
+
+        api_key = input("API密钥 (直接输入或留空跳过): ").strip()
+        prompt_config = input("提示词配置文件路径 (留空跳过): ").strip()
+
+        # 构建配置
+        new_config = {
+            "llm_name": llm_name,
+            "llm_base_url": base_url,
+        }
+        if api_key:
+            new_config["api_key"] = api_key
+        if prompt_config:
+            new_config["prompt_config"] = prompt_config
+
+        # 写入文件
+        with open(config_path, "w") as f:
+            yaml.safe_dump(new_config, f, default_flow_style=False, sort_keys=False)
+
+        console.print(Panel.fit(
+            f"[green]✅ 配置已保存到 {config_path}[/green]",
+            border_style="green",
+        ))
+        console.print()
+
+    # 处理设置请求
+    set_values = {}
+    if set_llm_name is not None:
+        set_values["llm_name"] = set_llm_name
+    if set_base_url is not None:
+        set_values["llm_base_url"] = set_base_url
+    if set_api_key is not None:
+        set_values["api_key"] = set_api_key
+    if set_prompt_config is not None:
+        set_values["prompt_config"] = set_prompt_config
+
+    if set_values:
+        # 确保目录存在
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # 读取现有配置并合并
+        config_data = {}
+        if config_path.exists():
+            with open(config_path) as f:
+                config_data = yaml.safe_load(f) or {}
+
+        # 合并新值
+        config_data.update(set_values)
+
+        # 写入文件
+        with open(config_path, "w") as f:
+            yaml.safe_dump(config_data, f, default_flow_style=False, sort_keys=False)
+
+        console.print(Panel.fit(
+            f"[green]✅ 已更新配置: {', '.join(set_values.keys())}[/green]",
+            border_style="green",
+        ))
+        console.print()
+
+    # 显示模式（默认或带--show 或设置值后确认）
+    if show or (not init and not set_values) or set_values:
+        console.print(Panel.fit(
+            "[bold]当前LLM配置[/bold]",
+            border_style="blue",
+        ))
+
+        table = Table(show_header=True, header_style="bold magenta")
+        table.add_column("配置项", style="cyan", width=20)
+        table.add_column("值", style="white")
+        table.add_column("来源", style="dim", width=30)
+
+        # 确定每个配置值的来源
+        config_keys = ["llm_name", "llm_base_url", "api_key", "prompt_config"]
+        env_var_map = {
+            "llm_name": "LLM_NAME",
+            "llm_base_url": "LLM_BASE_URL",
+            "api_key": "OPENAI_API_KEY",
+            "prompt_config": "LLM_PROMPT_CONFIG",
+        }
+
+        for key in config_keys:
+            value = None
+            source = None
+
+            # 检查环境变量
+            if key in env_var_map:
+                env_val = os.environ.get(env_var_map[key])
+                if env_val:
+                    value = env_val
+                    source = f"环境变量 ${env_var_map[key]}"
+
+            # 检查配置文件（如果环境变量未设置）
+            if value is None:
+                # 检查显式配置文件路径
+                for candidate in DEFAULT_SETTINGS_LOCATIONS:
+                    if candidate.is_file():
+                        with open(candidate) as f:
+                            file_data = yaml.safe_load(f) or {}
+                        if key in file_data:
+                            value = file_data[key]
+                            source = f"配置文件 {candidate}"
+                            break
+
+            # 如果配置文件中也没有，检查运行时设置（包含默认值）
+            if value is None:
+                runtime_val, location = load_runtime_settings()
+                if key in runtime_val and runtime_val[key]:
+                    value = runtime_val[key]
+                    if location:
+                        source = f"配置文件 {location}"
+                    else:
+                        source = "默认值"
+
+            # 处理敏感值（如api_key）
+            display_value = value if value else "(未设置)"
+            if key == "api_key" and value and len(value) > 4:
+                display_value = value[:4] + "****"
+
+            table.add_row(key, display_value, source or "默认值")
+
+        console.print(table)
+
+        # 显示配置文件路径（帮助用户定位）
+        console.print(f"\n[dim]配置文件路径: {config_path}[/dim]")
+        console.print(f"[dim]查找顺序: {DEFAULT_SETTINGS_LOCATIONS}[/dim]")
+
+
 def main():
     """
     CLI主入口点。
@@ -653,6 +838,7 @@ def main():
         "run": run_agent_query,
         "build": build_docker_image,
         "benchmark": run_benchmark,
+        "config": config,
     })
 
 
