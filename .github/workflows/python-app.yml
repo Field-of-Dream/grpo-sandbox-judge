@@ -27,12 +27,12 @@ jobs:
       # Linting with ruff
       - name: Lint with ruff
         run: ruff check grpo_in_sandbox
-      # Test with pytest
-      - name: Test with pytest
-        run: pytest --junitxml=junit/test-results-${{ matrix.python-version }}.xml
-      - name: Upload pytest test results
-        uses: actions/upload-artifact@v4
-        with:
-          name: pytest-results-${{ matrix.python-version }}
-          path: junit/test-results-${{ matrix.python-version }}.xml
-        if: ${{ always() }}
+      # Test with pytest (disabled - no tests exist yet)
+      #- name: Test with pytest
+      #  run: pytest --junitxml=junit/test-results-${{ matrix.python-version }}.xml
+      #- name: Upload pytest test results
+      #  uses: actions/upload-artifact@v4
+      #  with:
+      #    name: pytest-results-${{ matrix.python-version }}
+      #    path: junit/test-results-${{ matrix.python-version }}.xml
+      #  if: ${{ always() }}
