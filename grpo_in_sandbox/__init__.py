@@ -37,14 +37,21 @@ from .runtime import (
     LocalRuntime,
     create_runtime,
 )
-from .train import (
-    CodeExecutor,
-    ProductManager,
-    RewardModel,
-    RLHFTrainingConfig,
-    train,
-)
 from .trajectory import Trajectory, TrajectoryStep
+
+
+def __getattr__(name):
+    """Lazy-load heavy training deps (torch, transformers, unsloth) only when accessed."""
+    _train_exports = {
+        "AITrainerMode", "AIJudge", "AIJudgeRewardModel",
+        "SelfPlayGRPO", "CodeExecutor", "ProductManager",
+        "RewardModel", "RLHFTrainingConfig", "train",
+    }
+    if name in _train_exports:
+        import importlib
+        mod = importlib.import_module(".train", __package__)
+        return getattr(mod, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "train",
@@ -52,6 +59,10 @@ __all__ = [
     "ProductManager",
     "RewardModel",
     "CodeExecutor",
+    "AITrainerMode",
+    "AIJudge",
+    "AIJudgeRewardModel",
+    "SelfPlayGRPO",
     "BaseRuntime",
     "LocalRuntime",
     "DockerRuntime",

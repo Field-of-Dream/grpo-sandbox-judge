@@ -29,6 +29,7 @@ import random
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 import torch
@@ -51,6 +52,18 @@ def _setup_logger(name: str, level: int = logging.INFO) -> logging.Logger:
         log.addHandler(handler)
         log.setLevel(level)
     return log
+
+
+class AITrainerMode(str, Enum):
+    """AI Judge training mode for self-play GRPO.
+
+    Attributes:
+        SANDBOX: Use sandbox execution for reward scoring (default)
+        AI_JUDGE: Use LLM-as-judge for reward scoring
+    """
+
+    SANDBOX = "sandbox"
+    AI_JUDGE = "ai_judge"
 
 
 @dataclass
@@ -175,11 +188,19 @@ class RLHFTrainingConfig:
     vllm_gpu_memory_utilization: float = 0.7
     fast_inference: bool = True  # Enable vLLM fast inference
 
+    # AI Judge mode (for self-play GRPO)
+    mode: AITrainerMode = AITrainerMode.SANDBOX  # 'sandbox' or 'ai_judge'
+    judge_llm_name: str = "openai/gpt-4o-mini"  # LLM to use as judge
+    judge_criteria: list[str] | None = None  # e.g. ["correctness", "clarity", "helpfulness"]
+    judge_temperature: float = 0.1  # Low temp for consistent judging
+    judge_base_url: str | None = None  # Custom API endpoint for judge
+
     def __repr__(self) -> str:
         """Show training configuration."""
         return (
             f"RLHFTrainingConfig("
             f"model={self.model_name_or_path}, "
+            f"mode={self.mode.value}, "
             f"lr={self.learning_rate}, "
             f"beta={self.beta}, "
             f"lora_rank={self.lora_rank}, "
@@ -498,6 +519,307 @@ class GRPOSandboxRewardFunc:
         return rewards
 
 
+class AIJudge:
+    """LLM-as-Judge: uses an AI model to score responses for GRPO training.
+
+    This class calls a judge LLM (via litellm) to evaluate model-generated responses
+    against configurable criteria. It returns structured scores (0.0-1.0) that can
+    be used as reward signals for GRPO training.
+
+    The judge prompt asks the LLM to rate the response on each criterion and provide
+    a brief explanation. Scores are averaged across criteria and normalized.
+
+    Attributes:
+        llm_name: Model identifier for the judge LLM (e.g. "openai/gpt-4o-mini")
+        criteria: List of scoring criteria (e.g. ["correctness", "clarity"])
+        temperature: Sampling temperature for judge (low = consistent)
+        base_url: Optional custom API endpoint
+        system_prompt: System prompt template for the judge
+
+    Example:
+        >>> judge = AIJudge(llm_name="openai/gpt-4o-mini")
+        >>> result = judge.score(
+        ...     prompt="What is 2+2?",
+        ...     response="The answer is 4.",
+        ...     criteria=["correctness", "helpfulness"]
+        ... )
+        >>> result["score"]  # 0.92
+        >>> result["scores"]  # {"correctness": 1.0, "helpfulness": 0.83}
+        >>> result["explanation"]  # "The response correctly answers..."
+    """
+
+    DEFAULT_SYSTEM_PROMPT = """You are an expert evaluator. Your job is to score AI responses based on given criteria.
+Score each criterion from 0.0 to 1.0, where:
+- 1.0 = perfect
+- 0.7 = good
+- 0.5 = acceptable
+- 0.3 = poor
+- 0.0 = completely wrong or irrelevant
+
+Be strict but fair. Provide a brief explanation for each score."""
+
+    def __init__(
+        self,
+        llm_name: str = "openai/gpt-4o-mini",
+        criteria: list[str] | None = None,
+        temperature: float = 0.1,
+        base_url: str | None = None,
+    ):
+        self.llm_name = llm_name
+        self.criteria = criteria or ["correctness", "helpfulness", "clarity"]
+        self.temperature = temperature
+        self.base_url = base_url
+
+    def _build_judge_prompt(
+        self,
+        prompt: str,
+        response: str,
+        criteria: list[str] | None = None,
+    ) -> list[dict[str, str]]:
+        """Build the judge prompt messages."""
+        active_criteria = criteria or self.criteria
+        criteria_text = "\n".join(f"{i+1}. {c}" for i, c in enumerate(active_criteria))
+
+        user_content = f"""Please evaluate the following response.
+
+## Original Prompt
+{prompt}
+
+## Response to Evaluate
+{response}
+
+## Scoring Criteria
+{criteria_text}
+
+## Instructions
+Score each criterion from 0.0 to 1.0. Respond ONLY in JSON format:
+{{
+  "scores": {{"criterion_name": score, ...}},
+  "explanation": "Brief explanation of scores",
+  "overall_score": <average of all scores rounded to 2 decimals>
+}}"""
+
+        return [
+            {"role": "system", "content": self.DEFAULT_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ]
+
+    def score(
+        self,
+        prompt: str,
+        response: str,
+        criteria: list[str] | None = None,
+    ) -> dict:
+        """Score a response using the judge LLM.
+
+        Args:
+            prompt: The original prompt/question
+            response: The model's response to evaluate
+            criteria: Optional specific criteria (uses self.criteria if None)
+
+        Returns:
+            Dict with keys:
+                - score: float 0.0-1.0 (average across criteria)
+                - scores: dict of per-criterion scores
+                - explanation: string explanation
+        """
+        import re
+
+        import litellm
+
+        messages = self._build_judge_prompt(prompt, response, criteria)
+
+        kwargs = {
+            "model": self.llm_name,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": 512,
+        }
+        if self.base_url:
+            kwargs["api_base"] = self.base_url
+
+        try:
+            result = litellm.completion(**kwargs)
+            content = result.choices[0].message.content.strip()
+
+            # Try to parse JSON response
+            # First try direct JSON parse
+            try:
+                parsed = json.loads(content)
+            except json.JSONDecodeError:
+                # Try to extract JSON from markdown code blocks
+                json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', content, re.DOTALL)
+                if json_match:
+                    parsed = json.loads(json_match.group(1).strip())
+                else:
+                    # Try to find {...} in the content
+                    brace_match = re.search(r'\{.*\}', content, re.DOTALL)
+                    if brace_match:
+                        parsed = json.loads(brace_match.group(0))
+                    else:
+                        # Fallback: heuristic scoring
+                        return self._heuristic_fallback(prompt, response, criteria)
+
+            # Normalize and extract scores
+            scores = parsed.get("scores", {})
+            if not scores:
+                # Try 'overall_score' directly
+                overall = parsed.get("overall_score", 0.5)
+                return {
+                    "score": min(max(float(overall), 0.0), 1.0),
+                    "scores": {"overall": min(max(float(overall), 0.0), 1.0)},
+                    "explanation": parsed.get("explanation", ""),
+                }
+
+            # Average the per-criterion scores
+            score_values = [min(max(float(v), 0.0), 1.0) for v in scores.values()]
+            avg_score = sum(score_values) / len(score_values) if score_values else 0.5
+
+            return {
+                "score": round(avg_score, 4),
+                "scores": {k: min(max(float(v), 0.0), 1.0) for k, v in scores.items()},
+                "explanation": parsed.get("explanation", ""),
+            }
+
+        except Exception as e:
+            # On any error, use fallback scoring
+            logger = logging.getLogger(__name__)
+            logger.warning(f"AIJudge error: {e}. Using fallback scoring.")
+            return self._heuristic_fallback(prompt, response, criteria)
+
+    def _heuristic_fallback(
+        self,
+        prompt: str,
+        response: str,
+        criteria: list[str] | None = None,
+    ) -> dict:
+        """Fallback scoring when judge LLM fails."""
+        response_len = len(response)
+
+        # Length-based score (longer = more effort)
+        length_score = min(response_len / 500, 1.0) * 0.3
+
+        # Structure score (has numbered lists, code blocks, etc.)
+        structure_score = 0.0
+        if any(c in response for c in ["1.", "2.", "3.", "- "]):
+            structure_score += 0.2
+        if "```" in response:
+            structure_score += 0.2
+        if len(response.split("\n")) > 3:
+            structure_score += 0.1
+
+        total = min(length_score + structure_score, 1.0)
+        active_criteria = criteria or self.criteria
+
+        return {
+            "score": round(total, 4),
+            "scores": {c: round(total, 4) for c in active_criteria},
+            "explanation": "Fallback heuristic scoring (judge LLM unavailable).",
+        }
+
+
+class AIJudgeRewardModel:
+    """Reward function wrapper for GRPOTrainer that uses an AI judge.
+
+    Wraps AIJudge to match the GRPOTrainer reward_funcs interface:
+    reward_funcs(completions: List[str], prompts: List[str]) -> List[float]
+
+    Example:
+        >>> judge = AIJudge(llm_name="openai/gpt-4o-mini")
+        >>> reward_fn = AIJudgeRewardModel(judge)
+        >>> scores = reward_fn(["response A", "response B"], ["prompt X", "prompt Y"])
+    """
+
+    def __init__(
+        self,
+        judge: AIJudge,
+        criteria: list[str] | None = None,
+    ):
+        self.judge = judge
+        self.criteria = criteria
+
+    def __call__(self, completions: list[str], prompts: list[str]) -> list[float]:
+        rewards = []
+        for completion, prompt in zip(completions, prompts, strict=False):
+            result = self.judge.score(prompt, completion, criteria=self.criteria)
+            rewards.append(result["score"])
+        return rewards
+
+
+class SelfPlayGRPO:
+    """Self-Play GRPO orchestrator: generate → judge → train iterative loop.
+
+    This class orchestrates a complete self-play training loop where:
+    1. The model generates responses to prompts (generate phase)
+    2. An AI judge scores those responses (judge phase)
+    3. GRPO training updates the model using judge scores as rewards (train phase)
+
+    This enables RL training WITHOUT sandbox execution — the reward signal
+    comes entirely from AI evaluation.
+
+    Example:
+        >>> config = RLHFTrainingConfig(
+        ...     mode=AITrainerMode.AI_JUDGE,
+        ...     model_name_or_path="Qwen/Qwen2.5-0.5B-Instruct",
+        ...     judge_llm_name="openai/gpt-4o-mini",
+        ...     judge_criteria=["correctness", "clarity", "helpfulness"],
+        ...     max_steps=50,
+        ... )
+        >>> sp = SelfPlayGRPO(config)
+        >>> results = sp.run()
+    """
+
+    def __init__(
+        self,
+        config: RLHFTrainingConfig,
+        product_manager: ProductManager | None = None,
+        judge: AIJudge | None = None,
+    ):
+        self.config = config
+        self.pm = product_manager or ProductManager()
+
+        # Create AI judge from config if not provided
+        if judge is not None:
+            self.judge = judge
+        else:
+            self.judge = AIJudge(
+                llm_name=config.judge_llm_name,
+                criteria=config.judge_criteria,
+                temperature=config.judge_temperature,
+                base_url=config.judge_base_url,
+            )
+
+        self.reward_fn = AIJudgeRewardModel(self.judge, criteria=config.judge_criteria)
+        self.log = _setup_logger("SelfPlayGRPO")
+
+    def run(self) -> dict[str, Any]:
+        """Run the self-play GRPO training loop.
+
+        Returns:
+            Dict with training metrics including iteration history
+        """
+        self.log.info("=" * 60)
+        self.log.info("Starting Self-Play GRPO Training")
+        self.log.info(f"Mode: AI_JUDGE | Judge: {self.config.judge_llm_name}")
+        self.log.info(f"Criteria: {self.config.judge_criteria or self.judge.criteria}")
+        self.log.info(f"Model: {self.config.model_name_or_path}")
+        self.log.info("=" * 60)
+
+        # Delegate to the existing train() function with AI judge mode
+        # The train() function handles model loading, dataset prep, etc.
+        results = train(
+            config=self.config,
+            product_manager=self.pm,
+            ai_judge=self.judge,  # Pass AI judge for reward computation
+        )
+
+        self.log.info("Self-Play GRPO Training Complete")
+        results["mode"] = "ai_judge"
+        results["judge_llm"] = self.config.judge_llm_name
+
+        return results
+
+
 class CodeExecutor:
     """Executes code in local environment."""
 
@@ -663,6 +985,7 @@ def train(
     config: RLHFTrainingConfig,
     product_manager: ProductManager | None = None,
     reward_model: RewardModel | None = None,
+    ai_judge: AIJudge | None = None,
 ) -> dict[str, Any]:
     """Run GRPO training using Unsloth's optimized GRPOTrainer.
 
@@ -673,6 +996,7 @@ def train(
         config: RLHFTrainingConfig with model and training parameters
         product_manager: Optional ProductManager for custom task prompts
         reward_model: Optional RewardModel for sandbox-based reward scoring
+        ai_judge: Optional AIJudge for AI-judge-based reward scoring
 
     Returns:
         Dict with training metrics and results
@@ -720,8 +1044,23 @@ def train(
 
     log.info(f"Dataset prepared: {len(dataset)} samples ({config.num_generations} generations x {len(templates)} prompts)")
 
-    # Step 4: Create reward function
-    reward_func = _create_reward_func_from_rm(rm)
+    # Step 4: Create reward function (sandbox or AI judge mode)
+    if config.mode == AITrainerMode.AI_JUDGE or ai_judge is not None:
+        # AI Judge mode
+        effective_judge = ai_judge or AIJudge(
+            llm_name=config.judge_llm_name,
+            criteria=config.judge_criteria,
+            temperature=config.judge_temperature,
+            base_url=config.judge_base_url,
+        )
+        reward_func = AIJudgeRewardModel(effective_judge, criteria=config.judge_criteria)
+        log.info(f"Using AI Judge reward: {config.judge_llm_name}")
+        log.info(f"Judge criteria: {config.judge_criteria or effective_judge.criteria}")
+    else:
+        # Sandbox (default) mode
+        rm = reward_model or RewardModel()
+        reward_func = _create_reward_func_from_rm(rm)  # type: ignore[assignment]
+        log.info("Using sandbox-based reward model")
 
     # Step 5: Create GRPOConfig
     grpo_config = _create_grpo_config(config)
