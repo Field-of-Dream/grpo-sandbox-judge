@@ -672,9 +672,6 @@ def config(
     """
     config_path = Path.home() / ".grpo-in-sandbox" / "config.yaml"
 
-    # 加载现有配置
-    existing_config, _ = load_runtime_settings()
-
     # 初始化模式：创建默认配置
     if init:
         # 确保目录存在
