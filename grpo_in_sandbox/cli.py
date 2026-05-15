@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import docker
+import docker.errors
 import fire
 import yaml
 from rich.console import Console
@@ -50,6 +51,24 @@ DEFAULT_SETTINGS_LOCATIONS = [
     Path.home() / ".grpo-in-sandbox" / "config.yaml",
     Path.home() / ".grpo-in-sandbox.yaml",
 ]
+
+
+def _fix_string_bools(obj: Any) -> Any:
+    """
+    递归地将字符串'true'/'false'转换为布尔值True/False。
+
+    用于处理从命令行JSON解析的布尔值问题。
+    """
+    if isinstance(obj, dict):
+        return {k: _fix_string_bools(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_fix_string_bools(item) for item in obj]
+    elif isinstance(obj, str):
+        if obj.lower() == 'true':
+            return True
+        elif obj.lower() == 'false':
+            return False
+    return obj
 
 
 def get_default_config_path() -> Path:
@@ -389,23 +408,6 @@ def run_agent_query(
         logger.info(f"正在复制输入文件从 {input_dir} 到容器的 {container_input_dir}")
         runtime.copy_dir_to_container(input_dir, container_input_dir)
 
-    def _fix_string_bools(obj):
-        """
-        递归地将字符串'true'/'false'转换为布尔值True/False。
-
-        用于处理从命令行JSON解析的布尔值问题。
-        """
-        if isinstance(obj, dict):
-            return {k: _fix_string_bools(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [_fix_string_bools(item) for item in obj]
-        elif isinstance(obj, str):
-            if obj.lower() == 'true':
-                return True
-            elif obj.lower() == 'false':
-                return False
-        return obj
-
     try:
         # 处理extra_body：可以是dict（来自fire）或JSON字符串
         extra_body_dict = None
@@ -587,19 +589,6 @@ def run_benchmark(
     if mode == "llm-in-sandbox" and not ensure_docker_image(docker_image, logger):
         console.print(f"[red]未找到Docker镜像 '{docker_image}'！[/red]")
         sys.exit(1)
-
-    def _fix_string_bools(obj):
-        """递归地将字符串'true'/'false'转换为布尔值。"""
-        if isinstance(obj, dict):
-            return {k: _fix_string_bools(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [_fix_string_bools(item) for item in obj]
-        elif isinstance(obj, str):
-            if obj.lower() == 'true':
-                return True
-            elif obj.lower() == 'false':
-                return False
-        return obj
 
     # 处理extra_body
     extra_body_dict = None

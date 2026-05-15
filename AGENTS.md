@@ -1,42 +1,46 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-05-12
-**Commit:** ac4ecf6
+**Generated:** 2026-05-14
+**Commit:** 1134fc01
 **Branch:** main
 **Root:** grpo_in_sandbox/
 
 ## OVERVIEW
-LLM-in-Sandbox enables LLMs to execute code in isolated Docker sandboxes for agentic capabilities. Provides tool-use for science, math, physics tasks via litellm (OpenAI, Anthropic, vLLM, SGLang).
+LLM-in-Sandbox enables LLMs to execute code in isolated Docker sandboxes for agentic capabilities. Provides tool-use for science, math, physics tasks via litellm (OpenAI, Anthropic, vLLM, SGLang). Uses flat layout (no src/ dir) with grpo_in_sandbox/ as main package.
 
 ## STRUCTURE
 ```
-grpo_in_sandbox/
-├── __init__.py          # Package init
-├── agent.py             # Core Agent - LLM orchestration
-├── agent_configs.py     # Multi-agent team configuration system
-├── agent_factory.py     # Agent factory helpers
-├── action.py            # Action representation
-├── observation.py       # Action results wrapper
-├── trajectory.py        # Execution history recording
-├── runtime.py           # Runtime abstraction (Docker/Kaggle/Local)
-├── docker_runtime.py    # Docker container lifecycle
-├── kaggle_runtime.py    # Kaggle notebook runtime
-├── tools.py             # Tool definitions (JSON schema)
-├── cli.py               # CLI entry point (fire-based)
-├── train.py             # GRPO training interface
-├── config.py            # Configuration loader
-├── grpo_in_sandbox.py   # Package definitions
-├── benchmark/           # Evaluation tasks (math, physics, chem, biomed...)
-│   ├── runner.py        # Benchmark runner
-│   ├── math/            # Math problems
-│   ├── physics/         # Physics problems
-│   ├── chem/            # Chemistry
-│   ├── biomed/          # Biomedical
-│   ├── long_context/    # Long context
-│   ├── instruct_follow/ # Instruction following
-│   ├── instruct_pretrain/ # Pretraining tasks
-│   └── demo/            # Demo/testing
-└── config/              # Configuration (YAML configs)
+grpo_in_sandbox/                   # Project root
+├── grpo_in_sandbox.py             # Facade module (re-exports package)
+├── grpo_in_sandbox/               # Main package (67 Python files)
+│   ├── __init__.py                # Package init + exports
+│   ├── agent.py                   # Core Agent - LLM orchestration
+│   ├── agent_configs.py           # Multi-agent team configuration
+│   ├── agent_factory.py           # Agent factory helpers
+│   ├── action.py                  # Action representation
+│   ├── observation.py             # Action results wrapper
+│   ├── trajectory.py              # Execution history recording
+│   ├── runtime.py                 # Runtime abstraction (Docker/Kaggle/Local)
+│   ├── docker_runtime.py          # Docker container lifecycle
+│   ├── kaggle_runtime.py          # Kaggle notebook runtime
+│   ├── tools.py                   # Tool definitions (JSON schema)
+│   ├── cli.py                     # CLI entry point (fire-based)
+│   ├── train.py                   # GRPO training interface
+│   ├── config.py                  # Configuration loader
+│   ├── benchmark/                 # Evaluation tasks (has own AGENTS.md)
+│   │   ├── runner.py
+│   │   ├── math/
+│   │   ├── physics/
+│   │   ├── chem/
+│   │   ├── biomed/
+│   │   ├── long_context/
+│   │   ├── instruct_follow/
+│   │   ├── instruct_pretrain/
+│   │   └── demo/
+│   └── config/                    # YAML configs (6 files)
+├── pyproject.toml
+├── ruff.toml
+└── .github/workflows/python-app.yml
 ```
 
 ## WHERE TO LOOK
@@ -74,13 +78,15 @@ grpo_in_sandbox/
 - **max_steps**: Default 30 conversation turns
 - **Token limit**: Default 65536, auto-reduces on overflow
 - **Trajectory**: Records thought/action/observation for RL training
-- **Ruff**: Linter (line-length=100, target=py310)
-- **mypy**: Strict type checking required
+- **Ruff**: Linter (line-length=100, target-version=py310)
+- **mypy**: python_version=3.10, excludes benchmark/
+- **EditorConfig**: charset=utf-8, end_of_line=lf, indent_style=space, indent_size=4
 
 ## ANTI-PATTERNS (THIS PROJECT)
 - **File tools**: Only use `.py` and `.rst` files (context saving)
-- **Benchmark subdirs**: No `__init__.py` in benchmark/{task}/ directories
+- **Benchmark subdirs**: No `__init__.py` in benchmark/{task}/ directories (intentional)
 - **Flat layout**: No src/ directory, root-level modules
+- **NEVER comments**: observation.py contains a "NEVER ASK FOR HUMAN HELP" directive
 
 ## UNIQUE STYLES
 - Uses `rich` for colorful console output
@@ -98,3 +104,5 @@ python -m grpo_in_sandbox.benchmark.runner run_benchmark(...)
 
 ## NOTES
 - Workspace has CLAUDE.md at parent level - check for project-wide guidance
+- CLI entry point: cli.py provides fire-based commands (run, build, benchmark)
+- Test config exists in pyproject.toml but no tests/ directory yet

@@ -366,7 +366,7 @@ def run_vanilla_llm(query: str, agent_config: dict) -> tuple:
 
         try:
             response = litellm.completion(**kwargs)
-            answer = response.choices[0].message.content or ""
+            answer = response.choices[0].message.content or ""  # type: ignore[attr-defined]
             console_output = f"Query:\n{query}\n\nResponse:\n{answer}\n"
             return answer, console_output
 
@@ -508,7 +508,7 @@ def run_single_problem(args: dict) -> BenchmarkResult:
         # 转换轨迹为字典列表（如需要）
         traj_list = []
         if hasattr(trajectory, 'steps'):
-            traj_list = [s.to_dict() if hasattr(s, 'to_dict') else s for s in trajectory.steps]
+            traj_list = [s.to_dict() if hasattr(s, 'to_dict') else s for s in trajectory.steps]  # type: ignore[attr-defined]
         elif isinstance(trajectory, list):
             traj_list = trajectory
 

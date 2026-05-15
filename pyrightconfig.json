@@ -1,0 +1,14 @@
+{
+  "pythonVersion": "3.10",
+  "reportMissingImports": "warning",
+  "reportPrivateImportUsage": "warning",
+  "reportIndexIssue": "error",
+  "reportGeneralTypeIssues": "error",
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__",
+    ".venv",
+    "build",
+    "dist"
+  ]
+}

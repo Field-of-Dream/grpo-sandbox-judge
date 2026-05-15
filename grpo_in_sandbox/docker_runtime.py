@@ -9,6 +9,7 @@ import shlex
 import tarfile
 
 import docker
+import docker.errors
 
 from . import CMD_TIMEOUT, DOCKER_PATH
 

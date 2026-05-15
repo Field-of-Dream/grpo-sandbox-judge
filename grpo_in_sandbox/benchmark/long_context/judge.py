@@ -121,7 +121,7 @@ def judge_single(args: dict) -> dict:
 
     try:
         response = litellm.completion(**kwargs)
-        judge_response = response.choices[0].message.content or ""
+        judge_response = response.choices[0].message.content or ""  # type: ignore[attr-defined]
         verdict = extract_verdict(judge_response)
         score = 1.0 if verdict == "CORRECT" else 0.0
 
@@ -238,7 +238,7 @@ def main():
         verdict_counts = {"CORRECT": 0, "INCORRECT": 0, "UNKNOWN": 0, "ERROR": 0}
         for v in verdicts:
             verdict_counts[v] = verdict_counts.get(v, 0) + 1
-        majority_verdict = max(verdict_counts, key=verdict_counts.get)
+        majority_verdict = max(verdict_counts, key=verdict_counts.__getitem__)
 
         aggregated_results[problem_id] = {
             "problem_id": problem_id,

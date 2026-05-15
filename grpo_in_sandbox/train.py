@@ -640,7 +640,7 @@ Score each criterion from 0.0 to 1.0. Respond ONLY in JSON format:
 
         try:
             result = litellm.completion(**kwargs)
-            content = result.choices[0].message.content.strip()
+            content = result.choices[0].message.content.strip()  # type: ignore[attr-defined]
 
             # Try to parse JSON response
             # First try direct JSON parse

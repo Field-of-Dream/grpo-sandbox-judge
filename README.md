@@ -50,6 +50,37 @@ config = RLHFTrainingConfig(
 results = train(config)
 ```
 
+## AI Judge Self-Play Mode
+
+Train models WITHOUT sandbox execution using AI-as-Judge for reward signals.
+
+```python
+from grpo_in_sandbox import (
+    SelfPlayGRPO,
+    RLHFTrainingConfig,
+    AITrainerMode,
+    AIJudge,
+    ProductManager,
+)
+
+# Method 1: Using SelfPlayGRPO orchestrator
+config = RLHFTrainingConfig(
+    mode=AITrainerMode.AI_JUDGE,
+    model_name_or_path="Qwen/Qwen2.5-0.5B-Instruct",
+    judge_llm_name="openai/gpt-4o-mini",
+    judge_criteria=["correctness", "clarity", "helpfulness"],
+    max_steps=50,
+)
+sp = SelfPlayGRPO(config)
+sp.run()
+
+# Method 2: Using train() with ai_judge parameter
+judge = AIJudge(llm_name="openai/gpt-4o-mini")
+results = train(config, ai_judge=judge)
+```
+
+For full API tutorial, see [docs/AI_JUDGE_GRPO_TUTORIAL.md](docs/AI_JUDGE_GRPO_TUTORIAL.md)
+
 ## Runtime Example
 
 ```python
