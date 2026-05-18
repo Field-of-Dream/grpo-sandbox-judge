@@ -35,7 +35,6 @@ jobs:
       - name: Build package
         run: python -m build
 
-      # 保留原有的发布到 GitHub Packages 步骤
       - name: Publish to GitHub Packages
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -45,7 +44,6 @@ jobs:
             --username __token__ \
             --password "$GITHUB_TOKEN"
 
-      # 新增：发布到 PyPI
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
