@@ -36,6 +36,7 @@ jobs:
         run: python -m build
 
       - name: Publish to GitHub Packages
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
