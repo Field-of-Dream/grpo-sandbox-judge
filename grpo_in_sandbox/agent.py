@@ -221,6 +221,8 @@ class Agent:
                 break
 
             except Exception as e:
+                retries += 1
+
                 error_msg = str(e)
                 self.logger.error(f"LLM query failed @ {retries}: {e}")
 
@@ -266,8 +268,6 @@ class Agent:
                             self.logger.warning(f"⚠️ max_tokens already at minimum ({min_completion_tokens}), cannot reduce further")
                             raise
 
-                retries += 1
-
                 if "RateLimitError" in str(e):
                     time.sleep(60)
 
@@ -312,22 +312,25 @@ class Agent:
         except Exception as e:
             self.logger.warning(f"Failed to save litellm response: {e}")
 
-    def parse_response(self, response) -> tuple[str, Action, str | None]:
+    def parse_response(self, response) -> tuple[str, list[Action], list[str | None]]:
         """从 LLM 响应中提取 thought、action 和 tool_call_id。"""
         thought = response.choices[0].message.content or ""
 
-        tool_call_id = None
+        actions = []
+        tool_call_ids = []
         try:
-            tool_call = response.choices[0].message.tool_calls[0]
-            action = Action(
-                function_name=tool_call.function.name,
-                parameters=json.loads(tool_call.function.arguments),
-            )
-            tool_call_id = tool_call.id
+            for tool_call in response.choices[0].message.tool_calls:
+                action = Action(
+                    function_name=tool_call.function.name,
+                    parameters=json.loads(tool_call.function.arguments),
+                )
+                actions.append(action)
+                tool_call_ids.append(tool_call.id)
         except Exception:
-            action = Action(function_name="", parameters={})
+            actions = []
+            tool_call_ids = []
 
-        return thought, action, tool_call_id
+        return thought, actions, tool_call_ids
 
     def run(
         self,
@@ -422,7 +425,7 @@ class Agent:
                 ))
 
             # Parse response
-            thought, action, tool_call_id = self.parse_response(response)
+            thought, actions, tool_call_ids = self.parse_response(response)
 
             # Print thought
             if thought:
@@ -434,70 +437,77 @@ class Agent:
                     padding=(0, 1),
                 ))
 
-            # Print action
-            action_text = f"[bold]{action.function_name}[/bold]"
-            if action.parameters:
-                params_str = json.dumps(action.parameters, indent=2, ensure_ascii=False)
-                if len(params_str) > 300:
-                    params_str = params_str[:300] + "..."
-                action_text += f"\n{escape(params_str)}"
-            self.console.print(Panel(
-                action_text,
-                title="[bold yellow]⚡ ACTION[/bold yellow]",
-                border_style="yellow",
-                padding=(0, 1),
-            ))
+            # Track if any action leads to submission
+            done = False
 
-            # Execute and observe
-            observation = self._execute_action(action, runtime)
+            # Process each action (supports parallel tool calls)
+            for idx, (action, tool_call_id) in enumerate(zip(actions, tool_call_ids)):
+                # Print action
+                action_text = f"[bold]{action.function_name}[/bold]"
+                if action.parameters:
+                    params_str = json.dumps(action.parameters, indent=2, ensure_ascii=False)
+                    if len(params_str) > 300:
+                        params_str = params_str[:300] + "..."
+                    action_text += f"\n{escape(params_str)}"
+                self.console.print(Panel(
+                    action_text,
+                    title="[bold yellow]⚡ ACTION[/bold yellow]",
+                    border_style="yellow",
+                    padding=(0, 1),
+                ))
 
-            # Print observation
-            obs_display = observation[:800] + "..." if len(observation) > 800 else observation
-            self.console.print(Panel(
-                escape(obs_display),
-                title="[bold green]👁 OBSERVATION[/bold green]",
-                border_style="green",
-                padding=(0, 1),
-            ))
+                # Execute and observe
+                observation = self._execute_action(action, runtime)
 
-            # Record step
-            step_record = TrajectoryStep(
-                thought=thought,
-                reasoning_content=reasoning_content,
-                action=action.to_dict(),
-                observation=observation,
-                metadata={"step": step_count + 1, "exec_time": exec_time},
-            )
-            self.trajectory_steps.append(step_record)
+                # Print observation
+                obs_display = observation[:800] + "..." if len(observation) > 800 else observation
+                self.console.print(Panel(
+                    escape(obs_display),
+                    title="[bold green]👁 OBSERVATION[/bold green]",
+                    border_style="green",
+                    padding=(0, 1),
+                ))
 
-            # Update history
-            assistant_msg = response.choices[0].message
-            if hasattr(assistant_msg, 'model_dump'):
-                assistant_msg_dict = assistant_msg.model_dump(exclude_none=True)
-            elif hasattr(assistant_msg, 'to_dict'):
-                assistant_msg_dict = assistant_msg.to_dict()
-            else:
-                assistant_msg_dict = dict(assistant_msg)
-            self.history.append(assistant_msg_dict)
+                # Record step (only for first action to avoid duplicates)
+                if idx == 0:
+                    step_record = TrajectoryStep(
+                        thought=thought,
+                        reasoning_content=reasoning_content,
+                        action=action.to_dict(),
+                        observation=observation,
+                        metadata={"step": step_count + 1, "exec_time": exec_time},
+                    )
+                    self.trajectory_steps.append(step_record)
 
-            # Add tool result or CONTINUE_MSG
-            if action.function_name and tool_call_id:
-                self.history.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": observation,
-                })
-            elif not action.function_name:
-                # Model didn't use tool_calls, send CONTINUE_MSG as user message
-                self.history.append({
-                    "role": "user",
-                    "content": observation,  # This is CONTINUE_MSG
-                })
+                # Update history
+                assistant_msg = response.choices[0].message
+                if hasattr(assistant_msg, 'model_dump'):
+                    assistant_msg_dict = assistant_msg.model_dump(exclude_none=True)
+                elif hasattr(assistant_msg, 'to_dict'):
+                    assistant_msg_dict = assistant_msg.to_dict()
+                else:
+                    assistant_msg_dict = dict(assistant_msg)
+                self.history.append(assistant_msg_dict)
 
-            # Check if done
-            if action.function_name == "submit":
-                done = True
-                self.logger.info("Agent submitted answer")
+                # Add tool result or CONTINUE_MSG
+                if action.function_name and tool_call_id:
+                    self.history.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": observation,
+                    })
+                elif not action.function_name:
+                    # Model didn't use tool_calls, send CONTINUE_MSG as user message
+                    self.history.append({
+                        "role": "user",
+                        "content": observation,  # This is CONTINUE_MSG
+                    })
+
+                # Check if done
+                if action.function_name == "submit":
+                    done = True
+                    self.logger.info("Agent submitted answer")
+                    break
 
             step_count += 1
 

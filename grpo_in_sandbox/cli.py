@@ -341,6 +341,11 @@ def run_agent_query(
             "llm_name是必需的。请提供 --llm_name 或在设置YAML文件中设置。"
         )
 
+    # 保存原始环境变量以便恢复
+    _orig_openai_key = os.environ.get("OPENAI_API_KEY")
+    _orig_anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+    _orig_llm_base_url = os.environ.get("LLM_BASE_URL")
+
     # 根据模型类型设置API密钥
     if api_key:
         os.environ["OPENAI_API_KEY"] = str(api_key)
@@ -493,9 +498,23 @@ def run_agent_query(
                 ))
 
     finally:
-        # 清理
+        # 清理并恢复原始环境变量
         logger.info("正在清理Docker容器...")
         runtime.close()
+
+        # 恢复原始环境变量
+        if _orig_openai_key is not None:
+            os.environ["OPENAI_API_KEY"] = _orig_openai_key
+        elif "OPENAI_API_KEY" in os.environ:
+            del os.environ["OPENAI_API_KEY"]
+        if _orig_anthropic_key is not None:
+            os.environ["ANTHROPIC_API_KEY"] = _orig_anthropic_key
+        elif "ANTHROPIC_API_KEY" in os.environ:
+            del os.environ["ANTHROPIC_API_KEY"]
+        if _orig_llm_base_url is not None:
+            os.environ["LLM_BASE_URL"] = _orig_llm_base_url
+        elif "LLM_BASE_URL" in os.environ:
+            del os.environ["LLM_BASE_URL"]
 
 
 def run_benchmark(

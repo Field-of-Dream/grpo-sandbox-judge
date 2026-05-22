@@ -12,18 +12,7 @@ import docker
 import docker.errors
 
 from . import CMD_TIMEOUT, DOCKER_PATH
-
-
-def get_logger(name: str) -> logging.Logger:
-    logger = logging.getLogger(name)
-    if not logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        ))
-        logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
-    return logger
+from .agent import get_logger
 
 
 class DockerRuntime:
@@ -44,15 +33,6 @@ class DockerRuntime:
 
         if logger is None:
             self.logger = get_logger("DockerRuntime")
-        elif logger is False:
-            self.logger = logging.getLogger("DockerRuntime.quiet")
-            if not self.logger.handlers:
-                handler = logging.StreamHandler()
-                handler.setFormatter(logging.Formatter(
-                    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-                ))
-                self.logger.addHandler(handler)
-            self.logger.setLevel(logging.WARNING)
         else:
             self.logger = logger
 

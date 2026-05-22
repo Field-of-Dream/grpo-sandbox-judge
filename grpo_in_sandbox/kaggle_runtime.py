@@ -11,17 +11,7 @@ import shutil
 import subprocess
 import tempfile
 
-
-def get_logger(name: str) -> logging.Logger:
-    logger = logging.getLogger(name)
-    if not logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        ))
-        logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
-    return logger
+from .agent import get_logger
 
 
 class KaggleRuntime:
@@ -46,15 +36,6 @@ class KaggleRuntime:
 
         if logger is None:
             self.logger = get_logger("KaggleRuntime")
-        elif logger is False:
-            self.logger = logging.getLogger("KaggleRuntime.quiet")
-            if not self.logger.handlers:
-                handler = logging.StreamHandler()
-                handler.setFormatter(logging.Formatter(
-                    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-                ))
-                self.logger.addHandler(handler)
-            self.logger.setLevel(logging.WARNING)
         else:
             self.logger = logger
 

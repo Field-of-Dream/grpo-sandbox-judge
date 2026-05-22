@@ -1,4 +1,6 @@
 
+import json
+
 from .action import Action
 
 # 当智能体未调用任何工具时返回的提示消息
@@ -113,5 +115,8 @@ class Observation:
                         f"{truncated_output}"
                     )
             else:
-                output = f"Execution output of \\[{func_name}]:\n{self.bash_output}"
+                # For non-bash tools, show the action that was performed
+                params = getattr(self.action, 'parameters', {})
+                params_str = json.dumps(params, ensure_ascii=False) if params else 'none'
+                output = f"Execution output of \\[{func_name}]:\nAction parameters: {params_str}"
             return output

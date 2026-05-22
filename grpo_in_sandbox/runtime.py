@@ -69,17 +69,11 @@ class LocalRuntime(BaseRuntime):
     def run(self, code: str, timeout: int = 30, workdir: str | None = None) -> tuple[str, str]:
         result = self._run(code, timeout, workdir)
         output = result.stdout + result.stderr
-        exit_code = str(result.returncode)
-        if result.returncode != 0:
-            return output, f"Error: Exit code {exit_code}"
-        return output, exit_code
+        return output, str(result.returncode)
 
     def demux_run(self, code: str, timeout: int = 30, workdir: str | None = None) -> tuple[str, str, str]:
         result = self._run(code, timeout, workdir)
-        exit_code = str(result.returncode)
-        if result.returncode != 0:
-            return result.stdout, result.stderr, f"Error: Exit code {exit_code}"
-        return result.stdout, result.stderr, exit_code
+        return result.stdout, result.stderr, str(result.returncode)
 
     def close(self):
         pass
