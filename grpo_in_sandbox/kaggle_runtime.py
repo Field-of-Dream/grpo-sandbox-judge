@@ -160,7 +160,8 @@ class KaggleRuntime:
 
     def close(self):
         """清理临时文件"""
-        pass
+        if os.path.isdir(self.working_dir):
+            shutil.rmtree(self.working_dir, ignore_errors=True)
 
     def __del__(self):
-        pass
+        self.close()

@@ -13,11 +13,14 @@ Usage:
 
 import argparse
 import json
+import logging
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 
 def create_judge_prompt(question: str, ground_truth: str, model_answer: str) -> str:
@@ -100,11 +103,11 @@ def judge_single(args: dict) -> dict:
     # Debug: print first few prompts
     if debug:
         print(f"\n{'='*80}")
-        print(f"[DEBUG] Problem ID: {problem_id}")
-        print(f"[DEBUG] Ground Truth: {ground_truth}")
-        print(f"[DEBUG] Model Answer: {model_answer}")
-        print(f"[DEBUG] Judge Config: model={judge_config['model']}, temp={judge_config.get('temperature')}, max_tokens={judge_config.get('max_tokens')}")
-        print(f"[DEBUG] Full Prompt:\n{prompt}")
+        logger.debug(f"Problem ID: {problem_id}")
+        logger.debug(f"Ground Truth: {ground_truth}")
+        logger.debug(f"Model Answer: {model_answer}")
+        logger.debug(f"Judge Config: model={judge_config['model']}, temp={judge_config.get('temperature')}, max_tokens={judge_config.get('max_tokens')}")
+        logger.debug(f"Full Prompt:\n{prompt}")
         print(f"{'='*80}\n")
 
     kwargs = {
@@ -126,8 +129,8 @@ def judge_single(args: dict) -> dict:
         score = 1.0 if verdict == "CORRECT" else 0.0
 
         if debug:
-            print(f"[DEBUG] Judge Response: {judge_response}")
-            print(f"[DEBUG] Verdict: {verdict}, Score: {score}")
+            logger.debug(f"Judge Response: {judge_response}")
+            logger.debug(f"Verdict: {verdict}, Score: {score}")
 
         return {
             "problem_id": problem_id,

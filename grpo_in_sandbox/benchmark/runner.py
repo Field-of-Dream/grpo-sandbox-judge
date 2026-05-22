@@ -16,6 +16,7 @@
 import atexit
 import importlib.util
 import json
+import logging
 import os
 import signal
 import sys
@@ -25,6 +26,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -219,7 +222,6 @@ def create_agent_runner(
         output_dir: 容器内输出目录
     """
     # 在此处导入以避免循环导入
-    import logging
     import shutil
     import tempfile
 
@@ -231,7 +233,6 @@ def create_agent_runner(
     answer_path = f"{output_dir}/answer.txt"
 
     # 静默日志记录器 - 错误将被捕获为异常
-    logger = logging.getLogger("benchmark")
     logger.setLevel(logging.WARNING)
 
     def agent_runner(query: str, input_files: dict, local_output_dir: str) -> str:
@@ -372,9 +373,9 @@ def run_vanilla_llm(query: str, agent_config: dict) -> tuple:
 
         except Exception as e:
             error_msg = str(e)
-            print(f"❌ [DEBUG] 尝试：{attempt+1}/{max_retries} LiteLLM调用失败：")
-            print(f"   - 错误类型：{type(e).__name__}")
-            print(f"   - 错误消息：{error_msg}")
+            logger.error(f"LiteLLM call failed: attempt {attempt+1}/{max_retries}")
+            logger.error(f"   Error type: {type(e).__name__}")
+            logger.error(f"   Error message: {error_msg}")
 
             # 检查是否是token限制错误
             if "token" in error_msg.lower() and ("exceed" in error_msg.lower() or "limit" in error_msg.lower() or "maximum" in error_msg.lower()):
