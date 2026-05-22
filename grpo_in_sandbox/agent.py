@@ -16,7 +16,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import litellm
 from rich.console import Console
@@ -96,11 +96,11 @@ class AgentArgs:
     system_prompt: str  # System prompt for LLM
     instance_prompt: str  # Task prompt for this session
     llm_name: str  # Model name for litellm
-    llm_base_url: str | None = None  # Custom API base URL
+    llm_base_url: Optional[str] = None  # Custom API base URL
     max_retries: int = 5  # Max API retry attempts
     save_litellm_response: bool = False  # Save LLM responses
-    output_dir: str | None = None  # Output directory
-    extra_body: dict[str, Any] | None = None  # Extra API params
+    output_dir: Optional[str] = None  # Output directory
+    extra_body: Optional[Dict[str, Any]] = None  # Extra API params
     quiet: bool = False  # Suppress output for benchmarks
 
 
@@ -147,8 +147,8 @@ class Agent:
         if self.save_litellm_response:
             self.logger.info(f"📝 Save LiteLLM response enabled, output_dir: {self.output_dir}")
 
-        self.trajectory_steps: list[TrajectoryStep] = []
-        self.history: list[dict[str, str]] = []
+        self.trajectory_steps: List[TrajectoryStep] = []
+        self.history: List[Dict[str, str]] = []
 
     def get_console_output(self) -> str:
         """Get captured console output (only available in quiet mode)."""
@@ -161,7 +161,7 @@ class Agent:
         self.trajectory_steps = []
         self.history = []
 
-    def _count_tokens(self, messages: list[dict[str, str]]) -> int:
+    def _count_tokens(self, messages: List[Dict[str, str]]) -> int:
         """Count tokens in messages."""
         try:
             return litellm.token_counter(model=self.llm_name, messages=messages)
@@ -172,11 +172,11 @@ class Agent:
 
     def model_query(
         self,
-        messages: list[dict[str, str]],
+        messages: List[Dict[str, str]],
         temperature: float = 1.0,
         max_tokens_per_call: int = 65536,
         max_token_limit: int = 65536,
-    ) -> tuple[Any, float]:
+    ) -> Tuple[Any, float]:
         """向 LLM 发送查询请求，支持自动重试和 token 限制处理。"""
         tools = [str_replace_editor_tool, execute_bash_tool, submit_tool]
 
@@ -270,6 +270,7 @@ class Agent:
 
                 if "RateLimitError" in str(e):
                     time.sleep(60)
+                    continue
 
                 if retries >= self.max_retries:
                     raise e
@@ -277,7 +278,7 @@ class Agent:
         exec_time = time.time() - start_time
         return response, exec_time
 
-    def _save_litellm_response(self, messages: list[dict], response, extra_params: dict, kwargs: dict):
+    def _save_litellm_response(self, messages: List[dict], response, extra_params: dict, kwargs: dict):
         """Save litellm request and response to output_dir for debugging."""
         try:
             self.llm_call_count += 1
@@ -312,7 +313,7 @@ class Agent:
         except Exception as e:
             self.logger.warning(f"Failed to save litellm response: {e}")
 
-    def parse_response(self, response) -> tuple[str, list[Action], list[str | None]]:
+    def parse_response(self, response) -> Tuple[str, List[Action], List[Optional[str]]]:
         """从 LLM 响应中提取 thought、action 和 tool_call_id。"""
         thought = response.choices[0].message.content or ""
 
@@ -384,10 +385,7 @@ class Agent:
 
             # Add step count message to history
             steps_remaining = max_steps - step_count
-            if steps_remaining > 0:
-                step_msg = f"Steps Remaining: {steps_remaining}"
-            else:
-                step_msg = "You have reached the maximum number of steps. Please submit your answer NOW."
+            step_msg = f"Steps Remaining: {steps_remaining}"
             self.history[-1]["content"] += f"\n{step_msg}"
             self.logger.info(step_msg)
 
@@ -731,8 +729,8 @@ class AgentRegistry:
     """Agent注册表 - 管理多个Agent实例"""
 
     def __init__(self):
-        self._agents: dict[str, Agent] = {}
-        self._factories: dict[str, Callable] = {}
+        self._agents: Dict[str, Agent] = {}
+        self._factories: Dict[str, Callable] = {}
 
     def register(self, name: str, agent: 'Agent'):
         """注册一个Agent实例"""
@@ -753,11 +751,11 @@ class AgentRegistry:
             return factory(**kwargs)
         return None
 
-    def list_agents(self) -> list[str]:
+    def list_agents(self) -> List[str]:
         """列出所有已注册的Agent"""
         return list(self._agents.keys())
 
-    def list_factories(self) -> list[str]:
+    def list_factories(self) -> List[str]:
         """列出所有已注册的工厂"""
         return list(self._factories.keys())
 
@@ -776,8 +774,8 @@ _global_registry = AgentRegistry()
 
 def _create_agent_factory(agent_type: str):
     """创建指定类型Agent的工厂函数"""
-    def factory(llm_name: str, llm_base_url: str | None = None,
-        system_prompt: str | None = None, instance_prompt: str | None = None,
+    def factory(llm_name: str, llm_base_url: Optional[str] = None,
+        system_prompt: Optional[str] = None, instance_prompt: Optional[str] = None,
         quiet: bool = False, **kwargs) -> 'Agent':
         prompts = {
             "coder": ("""你是一个专业的Coder Agent，专注于编写高质量的代码。\n\n<CAPABILITIES>\n- 编写Python、JavaScript、Java、C++、Go、Rust等多种编程语言\n- 代码重构和优化\n- 调试和bug修复\n- 单元测试编写\n- 代码审查\n</CAPABILITIES>\n\n<TOOLS>\n- execute_bash: 执行shell命令和脚本\n- str_replace_editor: 查看、创建和编辑文件\n- submit: 提交完成的任务\n</TOOLS>\n\n<WORKFLOW>\n1. 理解需求并分析问题\n2. 设计代码结构和算法\n3. 编写代码并测试\n4. 调试和优化\n5. 提交完成的任务\n</WORKFLOW>""",
@@ -802,30 +800,33 @@ def _create_agent_factory(agent_type: str):
     return factory
 
 
-def create_coder_agent(llm_name: str, llm_base_url: str | None = None,
-    system_prompt: str | None = None, instance_prompt: str | None = None, **kwargs) -> 'Agent':
-    return _create_agent_factory("coder")(llm_name, llm_base_url, system_prompt, instance_prompt, **kwargs)
+def create_coder_agent(llm_name: str, llm_base_url: Optional[str] = None,
+    system_prompt: Optional[str] = None, instance_prompt: Optional[str] = None,
+    quiet: bool = False, **kwargs) -> 'Agent':
+    return _create_agent_factory("coder")(llm_name, llm_base_url, system_prompt, instance_prompt, quiet, **kwargs)
 
 
-def create_analyzer_agent(llm_name: str, llm_base_url: str | None = None,
-    system_prompt: str | None = None, instance_prompt: str | None = None, **kwargs) -> 'Agent':
-    return _create_agent_factory("analyzer")(llm_name, llm_base_url, system_prompt, instance_prompt, **kwargs)
+def create_analyzer_agent(llm_name: str, llm_base_url: Optional[str] = None,
+    system_prompt: Optional[str] = None, instance_prompt: Optional[str] = None,
+    quiet: bool = False, **kwargs) -> 'Agent':
+    return _create_agent_factory("analyzer")(llm_name, llm_base_url, system_prompt, instance_prompt, quiet, **kwargs)
 
 
-def create_research_agent(llm_name: str, llm_base_url: str | None = None,
-    system_prompt: str | None = None, instance_prompt: str | None = None, **kwargs) -> 'Agent':
-    return _create_agent_factory("research")(llm_name, llm_base_url, system_prompt, instance_prompt, **kwargs)
+def create_research_agent(llm_name: str, llm_base_url: Optional[str] = None,
+    system_prompt: Optional[str] = None, instance_prompt: Optional[str] = None,
+    quiet: bool = False, **kwargs) -> 'Agent':
+    return _create_agent_factory("research")(llm_name, llm_base_url, system_prompt, instance_prompt, quiet, **kwargs)
 
 
-def create_general_agent(llm_name: str, llm_base_url: str | None = None,
-    system_prompt: str | None = None, instance_prompt: str | None = None,
+def create_general_agent(llm_name: str, llm_base_url: Optional[str] = None,
+    system_prompt: Optional[str] = None, instance_prompt: Optional[str] = None,
     quiet: bool = False, **kwargs) -> 'Agent':
     return _create_agent_factory("general")(llm_name, llm_base_url, system_prompt, instance_prompt, quiet, **kwargs)
 
 
 def create_agent(agent_type: str = "general", llm_name: str = "openai/gpt-4",
-    llm_base_url: str | None = None, system_prompt: str | None = None,
-    instance_prompt: str | None = None, **kwargs) -> 'Agent':
+    llm_base_url: Optional[str] = None, system_prompt: Optional[str] = None,
+    instance_prompt: Optional[str] = None, **kwargs) -> 'Agent':
     """创建Agent的工厂函数，支持coder/analyzer/research/general类型"""
     factories = {
         "coder": create_coder_agent,

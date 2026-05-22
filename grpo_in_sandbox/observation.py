@@ -82,7 +82,7 @@ class Observation:
 
         if not func_name:
             return CONTINUE_MSG
-        elif func_name == "finish" or func_name == "submit":
+        elif func_name == "submit":
             return "<<< Finished >>>"
         else:
             if func_name == "execute_bash" or func_name == "bash":
