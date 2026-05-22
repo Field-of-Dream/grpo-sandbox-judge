@@ -138,13 +138,13 @@ mypy -p grpo_in_sandbox  # Must pass (if mypy available)
 
 ## TODOs
 
-- [ ] 1. Delete `grpo_in_sandbox.py`
-- [ ] 2. Delete `agent_factory.py`
-- [ ] 3. Delete `agent.md`
-- [ ] 4. Consolidate ruff config into `pyproject.toml` and delete `ruff.toml`
-- [ ] 5. Extract shared `get_logger()` into `runtime.py`, remove duplicates from `docker_runtime.py` and `kaggle_runtime.py`
-- [ ] 6. Refactor `DockerRuntime` to inherit `BaseRuntime`
-- [ ] 7. Refactor `KaggleRuntime` to inherit `BaseRuntime`
+  - [x] 1. Delete `grpo_in_sandbox.py`
+  - [ ] 2. Delete `agent_factory.py`
+  - [ ] 3. Delete `agent.md`
+  - [ ] 4. Consolidate ruff config into `pyproject.toml` and delete `ruff.toml`
+  - [ ] 5. Extract shared `get_logger()` into `runtime.py`, remove duplicates from `docker_runtime.py` and `kaggle_runtime.py`
+  - [ ] 6. Refactor `DockerRuntime` to inherit `BaseRuntime`
+  - [ ] 7. Refactor `KaggleRuntime` to inherit `BaseRuntime`
 
 ---
 

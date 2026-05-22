@@ -2,7 +2,7 @@
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 import yaml  # type: ignore[import-untyped]
 
@@ -28,7 +28,7 @@ class AgentProfile:
     system_prompt: str
     instance_prompt: str = "{problem_statement}"
     description: str = ""
-    capabilities: list[str] = field(default_factory=list)
+    capabilities: List[str] = field(default_factory=list)
 
     def format_system_prompt(self, **kwargs) -> str:
         return self.system_prompt.format(**kwargs)
@@ -36,7 +36,7 @@ class AgentProfile:
     def format_instance_prompt(self, **kwargs) -> str:
         return self.instance_prompt.format(**kwargs)
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "name": self.name,
             "role": self.role,
@@ -47,7 +47,7 @@ class AgentProfile:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "AgentProfile":
+    def from_dict(cls, data: Dict[str, Any]) -> "AgentProfile":
         return cls(
             name=data["name"],
             role=data["role"],
@@ -61,10 +61,10 @@ class AgentProfile:
 class AgentTeam:
     """Team of agents managing multiple agent profiles."""
 
-    def __init__(self, agents: list[AgentProfile] | None = None):
-        self.agents: list[AgentProfile] = agents or []
-        self._by_name: dict[str, AgentProfile] = {}
-        self._by_role: dict[str, list[AgentProfile]] = {}
+    def __init__(self, agents: Optional[List[AgentProfile]] = None):
+        self.agents: List[AgentProfile] = agents or []
+        self._by_name: Dict[str, AgentProfile] = {}
+        self._by_role: Dict[str, List[AgentProfile]] = {}
 
         for agent in self.agents:
             self._add_agent(agent)
@@ -79,7 +79,7 @@ class AgentTeam:
         self.agents.append(agent)
         self._add_agent(agent)
 
-    def get_agent(self, name: str | None = None, role: str | None = None) -> AgentProfile | None:
+    def get_agent(self, name: Optional[str] = None, role: Optional[str] = None) -> Optional[AgentProfile]:
         if name:
             return self._by_name.get(name)
         if role:
@@ -87,7 +87,7 @@ class AgentTeam:
             return agents[0] if agents else None
         return None
 
-    def get_agents_by_role(self, role: str) -> list[AgentProfile]:
+    def get_agents_by_role(self, role: str) -> List[AgentProfile]:
         return self._by_role.get(role, [])
 
     def __len__(self) -> int:
@@ -99,7 +99,7 @@ class AgentTeam:
     def __repr__(self) -> str:
         return f"AgentTeam(agents={len(self.agents)}, roles={list(self._by_role.keys())})"
 
-    def validate(self) -> list[str]:
+    def validate(self) -> List[str]:
         errors = []
         if not self.agents:
             errors.append("Team has no agents")
@@ -123,7 +123,7 @@ def load_team_from_yaml(path: str) -> AgentTeam:
     return team
 
 
-def load_team_from_dict(data: dict[str, Any]) -> AgentTeam:
+def load_team_from_dict(data: Dict[str, Any]) -> AgentTeam:
     """Load agent team from dictionary."""
     return AgentTeam([AgentProfile.from_dict(d) for d in data.get("agents", [])])
 
@@ -217,7 +217,7 @@ def create_team_from_template(template_name: str) -> AgentTeam:
 def profile_to_agent_args(
     profile: AgentProfile,
     llm_name: str = "openai/gpt-4",
-    llm_base_url: str | None = None,
+    llm_base_url: Optional[str] = None,
     max_retries: int = 5,
     **kwargs,
 ) -> Any:
@@ -243,9 +243,9 @@ def run_agent_team(
     task: str,
     llm_name: str = "openai/gpt-4",
     runtime=None,
-    llm_base_url: str | None = None,
+    llm_base_url: Optional[str] = None,
     max_steps: int = 30,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     """Run a task across an agent team - each agent processes independently."""
     log = logging.getLogger(__name__)
     log.info("=" * 50)

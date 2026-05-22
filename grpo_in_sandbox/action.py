@@ -5,7 +5,7 @@
 包括函数名称和参数。
 """
 
-from typing import Any
+from typing import Any, Dict, Optional
 
 
 class Action:
@@ -15,7 +15,7 @@ class Action:
       - parameters: 参数字典，参数名到值的映射
     """
 
-    def __init__(self, function_name: str, parameters: dict[str, Any], function_id: str | None = None):
+    def __init__(self, function_name: str, parameters: Dict[str, Any], function_id: Optional[str] = None):
         """
         初始化动作。
 
@@ -32,7 +32,7 @@ class Action:
         """返回动作的字符串表示。"""
         return str(self.to_dict())
 
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(self) -> Dict[str, object]:
         """
         将动作转换为字典格式，用于序列化。
 

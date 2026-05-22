@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 from abc import ABC, abstractmethod
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +33,11 @@ class BaseRuntime(ABC):
     """Abstract base class for sandbox runtimes."""
 
     @abstractmethod
-    def run(self, code: str, timeout: int = 30, workdir: str | None = None) -> tuple[str, str]:
+    def run(self, code: str, timeout: int = 30, workdir: Optional[str] = None) -> Tuple[str, str]:
         pass
 
     @abstractmethod
-    def demux_run(self, code: str, timeout: int = 30, workdir: str | None = None) -> tuple[str, str, str]:
+    def demux_run(self, code: str, timeout: int = 30, workdir: Optional[str] = None) -> Tuple[str, str, str]:
         pass
 
     @abstractmethod
@@ -59,19 +60,19 @@ class LocalRuntime(BaseRuntime):
         self.working_dir = working_dir
         os.makedirs(working_dir, exist_ok=True)
 
-    def _run(self, code: str, timeout: int = 30, workdir: str | None = None):
+    def _run(self, code: str, timeout: int = 30, workdir: Optional[str] = None):
         exec_workdir = workdir or self.working_dir
         return subprocess.run(
             code, shell=True, capture_output=True,
             text=True, timeout=timeout, cwd=exec_workdir,
         )
 
-    def run(self, code: str, timeout: int = 30, workdir: str | None = None) -> tuple[str, str]:
+    def run(self, code: str, timeout: int = 30, workdir: Optional[str] = None) -> Tuple[str, str]:
         result = self._run(code, timeout, workdir)
         output = result.stdout + result.stderr
         return output, str(result.returncode)
 
-    def demux_run(self, code: str, timeout: int = 30, workdir: str | None = None) -> tuple[str, str, str]:
+    def demux_run(self, code: str, timeout: int = 30, workdir: Optional[str] = None) -> Tuple[str, str, str]:
         result = self._run(code, timeout, workdir)
         return result.stdout, result.stderr, str(result.returncode)
 
@@ -119,7 +120,7 @@ class KaggleRuntime(BaseRuntime):
     def __init__(self, working_dir: str = "/kaggle/working"):
         self.working_dir = working_dir
         os.makedirs(working_dir, exist_ok=True)
-        self._exec_history: list[dict[str, str]] = []
+        self._exec_history: List[Dict[str, str]] = []
 
     def _run_code(self, code: str, timeout: int = 30) -> str:
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
@@ -141,7 +142,7 @@ class KaggleRuntime(BaseRuntime):
             with contextlib.suppress(OSError):
                 os.unlink(temp_path)
 
-    def run(self, code: str, timeout: int = 30, workdir: str | None = None) -> tuple[str, str]:
+    def run(self, code: str, timeout: int = 30, workdir: Optional[str] = None) -> Tuple[str, str]:
         try:
             output = self._run_code(code, timeout)
             return output, "0"
@@ -150,7 +151,7 @@ class KaggleRuntime(BaseRuntime):
         except Exception as e:
             return f"Error: {repr(e)}", "-1"
 
-    def demux_run(self, code: str, timeout: int = 30, workdir: str | None = None) -> tuple[str, str, str]:
+    def demux_run(self, code: str, timeout: int = 30, workdir: Optional[str] = None) -> Tuple[str, str, str]:
         try:
             output = self._run_code(code, timeout)
             return output, "", "0"
