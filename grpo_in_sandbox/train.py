@@ -1,24 +1,7 @@
 """
-grpo-in-sandbox training module
+GRPO-in-Sandbox Training Module
 
-this module provides a complete implementation for training language models using grpo
-(group relative policy optimization) within a code sandbox environment.
-
-key components:
-- rlhftrainingconfig: configuration for training
-- productmanager: task prompt generation
-- rewardmodel: sandbox-based reward scoring
-- grpotrainer (via trl): unsloth-optimized grpo training with vllm acceleration
-
-usage:
-    from grpo_in_sandbox import train, rlhftrainingconfig
-
-    config = rlhftrainingconfig(
-        model_name_or_path="qwen/qwen2.5-0.5b-instruct",
-        num_train_epochs=3,
-        max_steps=100,
-    )
-    results = train(config)
+Provides GRPO (Group Relative Policy Optimization) training within a code sandbox environment.
 """
 
 import contextlib
@@ -26,119 +9,27 @@ import json
 import logging
 import os
 import random
+import re
+import subprocess
 import tempfile
-from collections.abc import callable
+from collections.abc import Callable
 from dataclasses import dataclass
-from enum import enum
-from typing import any
-
-import torch
-from transformers import autotokenizer
-from unsloth import fastlanguagemodel
-
-# module-level logger
-train_logger = logging.getlogger(__name__)
-
-
-def _setup_logger(name: str, level: int = logging.info) -> logging.logger:
-    """configure and return a logger with consistent formatting."""
-    log = logging.getlogger(name)
-    if not log.handlers:
-        handler = logging.streamhandler()
-        handler.setformatter(logging.formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            datefmt="%h:%m:%s",
-        ))
-        log.addhandler(handler)
-        log.setlevel(level)
-    return log
-
-
-class aitrainermode(str, enum):
-    """ai judge training mode for self-play grpo.
-
-    attributes:
-        sandbox: use sandbox execution for reward scoring (default)
-        ai_judge: use llm-as-judge for reward scoring
-    """
-
-    sandbox = "sandbox"
-    ai_judge = "ai_judge"
-
-
-"""
-grpo-in-sandbox 训练模块
-
-该模块提供了在代码沙箱环境中使用 GRPO（组相对策略优化）训练语言模型的完整实现。
-
-关键组件：
-- rlhftrainingconfig：训练配置
-- productmanager：任务提示词生成
-- rewardmodel：基于沙箱的奖励评分
-- grpotrainer（通过 trl）：利用 unsloth 优化和 vLLM 加速的 GRPO 训练
-
-用法：
-    from grpo_in_sandbox import train, rlhftrainingconfig
-
-    config = rlhftrainingconfig(
-        model_name_or_path="qwen/qwen2.5-0.5b-instruct",
-        num_train_epochs=3,
-        max_steps=100,
-    )
-    results = train(config)
-"""
-
-import contextlib
-import json
-import logging
-import os
-import random
-import tempfile
-from collections.abc import callable
-from dataclasses import dataclass
-from enum import enum
-from typing import any
-
-import torch
-from transformers import autotokenizer
-from unsloth import fastlanguagemodel
-
-# 模块级日志记录器
-train_logger = logging.getlogger(__name__)
-
-
-def _setup_logger(name: str, level: int = logging.info) -> logging.logger:
-    """配置并返回一个格式一致的日志记录器。"""
-    log = logging.getlogger(name)
-    if not log.handlers:
-        handler = logging.streamhandler()
-        handler.setformatter(logging.formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            datefmt="%h:%m:%s",
-        ))
-        log.addhandler(handler)
-        log.setlevel(level)
-    return log
-
-
-class aitrainermode(str, enum):
-    """用于自我博弈 GRPO 的 AI 评判训练模式。
-
-    属性：
-        sandbox：使用沙箱执行进行奖励评分（默认）
-        ai_judge：使用 LLM 作为评判进行奖励评分
-    """
-
-    sandbox = "sandbox"
-    ai_judge = "ai_judge"
-
-
-from typing import Optional, List
 from enum import Enum
+from typing import Any, Optional, List
+
+import torch
+from transformers import AutoTokenizer
+from unsloth import FastLanguageModel
+
+
+logger = logging.getLogger(__name__)
+
 
 class AITrainerMode(Enum):
+    """AI judge training mode for self-play GRPO."""
     SANDBOX = "sandbox"
     AI_JUDGE = "ai_judge"
+
 
 class RLHFTrainingConfig:
     def __init__(
@@ -426,7 +317,7 @@ class RLHFTrainingConfig:
 
         return cls(**known_params)
 
-class productmanager:
+class ProductManager:
     """manages task prompts for grpo training.
 
     this class generates and manages task prompts that are used to generate
@@ -445,13 +336,13 @@ class productmanager:
 
     example:
         >>> # method 1: pass prompts in constructor
-        >>> pm = productmanager(task_templates=[
+        >>> pm = ProductManager(task_templates=[
         ...     "write a function to sort a list",
         ...     "implement binary search",
         ... ])
         >>>
         >>> # method 2: add prompts dynamically
-        >>> pm = productmanager()
+        >>> pm = ProductManager()
         >>> pm.add_task_template("your custom prompt here")
         >>>
         >>> # generate a random task
@@ -459,36 +350,36 @@ class productmanager:
         >>> messages = pm.format_prompt(task)
 
     usage - provide custom prompts:
-        from grpo_in_sandbox import productmanager
+        from grpo_in_sandbox import ProductManager
 
         # method 1: pass prompts in constructor
-        pm = productmanager(task_templates=[
+        pm = ProductManager(task_templates=[
             "write a function to sort a list",
             "implement binary search",
         ])
 
         # method 2: add prompts dynamically
-        pm = productmanager()
+        pm = ProductManager()
         pm.add_task_template("your custom prompt here")
 
     usage with train():
-        from grpo_in_sandbox import train, rlhftrainingconfig, productmanager
+        from grpo_in_sandbox import train, RLHFTrainingConfig, ProductManager
 
-        pm = productmanager(task_templates=["your prompt 1", "your prompt 2"])
-        config = rlhftrainingconfig(max_steps=10)
+        pm = ProductManager(task_templates=["your prompt 1", "your prompt 2"])
+        config = RLHFTrainingConfig(max_steps=10)
         results = train(config, product_manager=pm)
     """
 
-    def __init__(self, task_templates: list[str] | none = none):
-        """initialize productmanager.
+    def __init__(self, task_templates: list[str] | None = None):
+        """initialize ProductManager.
 
         args:
             task_templates: optional list of custom prompt templates.
                           if none or empty, uses default chinese qa templates.
         """
-        self.task_templates: list[str] = task_templates if task_templates is not none else []
+        self.task_templates: list[str] = task_templates if task_templates is not None else []
         self.num_generated = 0
-        self._custom_system_prompt: str | none = none
+        self._custom_system_prompt: str | None = None
         self._default_templates: list[str] = [
             "作为qa工程师，请测试以下功能：用户登录系统，包括正常登录、密码错误、账户锁定等场景。",
             "请进行回归测试：订单创建功能，验证库存扣减、支付流程、订单状态流转。",
@@ -499,17 +390,17 @@ class productmanager:
             "执行性能测试：模拟高并发场景，检查系统响应时间和稳定性。",
         ]
 
-    def add_task_template(self, template: str) -> none:
+    def add_task_template(self, template: str) -> None:
         """add a custom task prompt template."""
         self.task_templates.append(template)
 
-    def add_task_templates(self, templates: list[str]) -> none:
+    def add_task_templates(self, templates: list[str]) -> None:
         """add multiple custom task prompt templates."""
         self.task_templates.extend(templates)
 
     @classmethod
-    def from_file(cls, file_path: str) -> "productmanager":
-        """create productmanager from a file containing prompts."""
+    def from_file(cls, file_path: str) -> "ProductManager":
+        """create ProductManager from a file containing prompts."""
         with open(file_path, encoding="utf-8") as f:
             templates = [line.strip() for line in f if line.strip()]
         return cls(task_templates=templates)
@@ -520,7 +411,7 @@ class productmanager:
         templates = self.task_templates if self.task_templates else self._default_templates
         return random.choice(templates)
 
-    def format_prompt(self, task: str, system_prompt: str | none = none) -> list[dict[str, str]]:
+    def format_prompt(self, task: str, system_prompt: str | None = None) -> list[dict[str, str]]:
         """format task as chat messages."""
         default_system = "你是一个专业的qa工程师，负责执行测试任务。"
         # priority: parameter > _custom_system_prompt > default
@@ -530,7 +421,7 @@ class productmanager:
             {"role": "user", "content": f"任务：{task}"},
         ]
 
-    def set_system_prompt(self, system_prompt: str) -> none:
+    def set_system_prompt(self, system_prompt: str) -> None:
         """set a custom system prompt."""
         self._custom_system_prompt = system_prompt
 
@@ -551,15 +442,15 @@ class productmanager:
         """
         try:
             from datasets import dataset
-        except importerror as e:
-            raise importerror("datasets library required. install with: pip install datasets") from e
+        except ImportError as e:
+            raise ImportError("datasets library required. install with: pip install datasets") from e
 
         templates = self.task_templates if self.task_templates else self._default_templates
         # use from_list to create dataset from list of prompts (each prompt is a row)
         return dataset.from_list([{"prompt": t} for t in templates])
 
 
-class rewardmodel:
+class RewardModel:
     """scores agent outputs for grpo reward calculation.
 
     this reward model evaluates model completions and returns a score between 0 and 1.
@@ -585,14 +476,14 @@ class rewardmodel:
             if none, only keyword-based scoring is used.
 
     example:
-        >>> from grpo_in_sandbox import rewardmodel
+        >>> from grpo_in_sandbox import RewardModel
         >>>
         >>> # without sandbox (keyword only)
-        >>> rm = rewardmodel()
+        >>> rm = RewardModel()
         >>> score = rm.score("write tests for login", "1. test normal login\\n2. test wrong password")
         >>>
         >>> # with sandbox execution
-        >>> rm = rewardmodel(runtime=docker_runtime)
+        >>> rm = RewardModel(runtime=docker_runtime)
         >>> score = rm.score("write tests", "def test_login(): ...")
 
 
@@ -601,13 +492,13 @@ class rewardmodel:
             types: dockerruntime, kaggleruntime, localruntime.
     """
 
-    def __init__(self, runtime: any = none):
+    def __init__(self, runtime: Any = None):
         self.runtime = runtime
 
-    def score(self, task: str, qa_output: str, trajectory: any = none) -> float:
+    def score(self, task: str, qa_output: str, trajectory: Any = None) -> float:
         """score the agent output."""
         base_score = self._keyword_based_score(task, qa_output)
-        if self.runtime is not none:
+        if self.runtime is not None:
             sandbox_score = self._sandbox_score(qa_output)
             return min(0.6 * base_score + 0.4 * sandbox_score, 1.0)
         return base_score
@@ -636,7 +527,7 @@ class rewardmodel:
 
     def _sandbox_score(self, qa_output: str) -> float:
         try:
-            if self.runtime is none:
+            if self.runtime is None:
                 return 0.5
             if "def test_" not in qa_output and "import unittest" not in qa_output:
                 return 0.5
@@ -645,7 +536,7 @@ class rewardmodel:
                 return 0.5
 
             # use tempfile to avoid file path conflicts in parallel execution
-            with tempfile.namedtemporaryfile(mode='w', suffix='.py', delete=false, encoding='utf-8') as f:
+            with tempfile.namedtemporaryfile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
                 test_file = f.name
                 f.write(test_code)
 
@@ -661,16 +552,16 @@ class rewardmodel:
                 try:
                     import os
                     os.unlink(test_file)
-                except oserror:
+                except OSError:
                     pass
-        except exception:
+        except Exception:
             return 0.5
 
     def _extract_test_code(self, qa_output: str) -> str:
         lines = qa_output.split("\n")
         import_lines = []
         test_lines = []
-        in_test = false
+        in_test = False
 
         # first pass: collect import lines
         for line in lines:
@@ -681,7 +572,7 @@ class rewardmodel:
         # second pass: collect test functions/classes
         for line in lines:
             if "def test_" in line or "class test" in line:
-                in_test = true
+                in_test = True
             if in_test:
                 test_lines.append(line)
 
@@ -706,11 +597,11 @@ class rewardmodel:
 class grposandboxrewardfunc:
     """reward function wrapper for grpotrainer that executes in sandbox.
 
-    this wraps the rewardmodel to match the grpotrainer reward_funcs interface:
+    this wraps the RewardModel to match the grpotrainer reward_funcs interface:
     reward_funcs(completions: list[str], prompts: list[str]) -> list[float]
     """
 
-    def __init__(self, reward_model: rewardmodel, task_prefix: str = "任务："):
+    def __init__(self, reward_model: RewardModel, task_prefix: str = "任务："):
         self.reward_model = reward_model
         self.task_prefix = task_prefix
 
@@ -725,7 +616,7 @@ class grposandboxrewardfunc:
             list of reward scores (float between 0 and 1)
         """
         rewards = []
-        for completion, prompt in zip(completions, prompts, strict=false):
+        for completion, prompt in zip(completions, prompts, strict=False):
             # extract task from prompt (remove task_prefix if present)
             task = prompt
             if self.task_prefix in prompt:
@@ -735,7 +626,7 @@ class grposandboxrewardfunc:
         return rewards
 
 
-class aijudge:
+class AIJudge:
     """llm-as-judge: uses an ai model to score responses for grpo training.
 
     this class calls a judge llm (via litellm) to evaluate model-generated responses
@@ -753,7 +644,7 @@ class aijudge:
         system_prompt: system prompt template for the judge
 
     example:
-        >>> judge = aijudge(llm_name="openai/gpt-4o-mini")
+        >>> judge = AIJudge(llm_name="openai/gpt-4o-mini")
         >>> result = judge.score(
         ...     prompt="what is 2+2?",
         ...     response="the answer is 4.",
@@ -777,9 +668,9 @@ be strict but fair. provide a brief explanation for each score."""
     def __init__(
         self,
         llm_name: str = "openai/gpt-4o-mini",
-        criteria: list[str] | none = none,
+        criteria: list[str] | None = None,
         temperature: float = 0.1,
-        base_url: str | none = none,
+        base_url: str | None = None,
     ):
         self.llm_name = llm_name
         self.criteria = criteria or ["correctness", "helpfulness", "clarity"]
@@ -790,7 +681,7 @@ be strict but fair. provide a brief explanation for each score."""
         self,
         prompt: str,
         response: str,
-        criteria: list[str] | none = none,
+        criteria: list[str] | None = None,
     ) -> list[dict[str, str]]:
         """build the judge prompt messages."""
         active_criteria = criteria or self.criteria
@@ -824,7 +715,7 @@ score each criterion from 0.0 to 1.0. respond only in json format:
         self,
         prompt: str,
         response: str,
-        criteria: list[str] | none = none,
+        criteria: list[str] | None = None,
     ) -> dict:
         """score a response using the judge llm.
 
@@ -862,14 +753,14 @@ score each criterion from 0.0 to 1.0. respond only in json format:
             # first try direct json parse
             try:
                 parsed = json.loads(content)
-            except json.jsondecodeerror:
+            except json.JSONDecodeError:
                 # try to extract json from markdown code blocks
-                json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', content, re.dotall)
+                json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', content, re.DOTALL)
                 if json_match:
                     parsed = json.loads(json_match.group(1).strip())
                 else:
                     # try to find {...} in the content
-                    brace_match = re.search(r'\{.*\}', content, re.dotall)
+                    brace_match = re.search(r'\{.*\}', content, re.DOTALL)
                     if brace_match:
                         parsed = json.loads(brace_match.group(0))
                     else:
@@ -897,17 +788,17 @@ score each criterion from 0.0 to 1.0. respond only in json format:
                 "explanation": parsed.get("explanation", ""),
             }
 
-        except exception as e:
+        except Exception as e:
             # on any error, use fallback scoring
-            logger = logging.getlogger(__name__)
-            logger.warning(f"aijudge error: {e}. using fallback scoring.")
+            logger = logging.getLogger(__name__)
+            logger.warning(f"AIJudge error: {e}. using fallback scoring.")
             return self._heuristic_fallback(prompt, response, criteria)
 
     def _heuristic_fallback(
         self,
         prompt: str,
         response: str,
-        criteria: list[str] | none = none,
+        criteria: list[str] | None = None,
     ) -> dict:
         """fallback scoring when judge llm fails."""
         response_len = len(response)
@@ -934,29 +825,29 @@ score each criterion from 0.0 to 1.0. respond only in json format:
         }
 
 
-class aijudgerewardmodel:
+class AIJudgeRewardModel:
     """reward function wrapper for grpotrainer that uses an ai judge.
 
-    wraps aijudge to match the grpotrainer reward_funcs interface:
+    wraps AIJudge to match the grpotrainer reward_funcs interface:
     reward_funcs(completions: list[str], prompts: list[str]) -> list[float]
 
     example:
-        >>> judge = aijudge(llm_name="openai/gpt-4o-mini")
-        >>> reward_fn = aijudgerewardmodel(judge)
+        >>> judge = AIJudge(llm_name="openai/gpt-4o-mini")
+        >>> reward_fn = AIJudgeRewardModel(judge)
         >>> scores = reward_fn(["response a", "response b"], ["prompt x", "prompt y"])
     """
 
     def __init__(
         self,
-        judge: aijudge,
-        criteria: list[str] | none = none,
+        judge: AIJudge,
+        criteria: list[str] | None = None,
     ):
         self.judge = judge
         self.criteria = criteria
 
     def __call__(self, completions: list[str], prompts: list[str]) -> list[float]:
         rewards = []
-        for completion, prompt in zip(completions, prompts, strict=false):
+        for completion, prompt in zip(completions, prompts, strict=False):
             result = self.judge.score(prompt, completion, criteria=self.criteria)
             rewards.append(result["score"])
         return rewards
@@ -974,8 +865,8 @@ class selfplaygrpo:
     comes entirely from ai evaluation.
 
     example:
-        >>> config = rlhftrainingconfig(
-        ...     mode=aitrainermode.ai_judge,
+        >>> config = RLHFTrainingConfig(
+        ...     mode=AITrainerMode.ai_judge,
         ...     model_name_or_path="qwen/qwen2.5-0.5b-instruct",
         ...     judge_llm_name="openai/gpt-4o-mini",
         ...     judge_criteria=["correctness", "clarity", "helpfulness"],
@@ -987,25 +878,25 @@ class selfplaygrpo:
 
     def __init__(
         self,
-        config: rlhftrainingconfig,
-        product_manager: productmanager | none = none,
-        judge: aijudge | none = none,
+        config: RLHFTrainingConfig,
+        product_manager: ProductManager | None = None,
+        judge: AIJudge | None = None,
     ):
         self.config = config
-        self.pm = product_manager or productmanager()
+        self.pm = product_manager or ProductManager()
 
         # create ai judge from config if not provided
-        if judge is not none:
+        if judge is not None:
             self.judge = judge
         else:
-            self.judge = aijudge(
+            self.judge = AIJudge(
                 llm_name=config.judge_llm_name,
                 criteria=config.judge_criteria,
                 temperature=config.judge_temperature,
                 base_url=config.judge_base_url,
             )
 
-        self.reward_fn = aijudgerewardmodel(self.judge, criteria=config.judge_criteria)
+        self.reward_fn = AIJudgeRewardModel(self.judge, criteria=config.judge_criteria)
         self.log = _setup_logger("selfplaygrpo")
 
     def run(self) -> dict[str, any]:
@@ -1041,34 +932,34 @@ class codeexecutor:
 
     def __init__(self, working_dir: str = "/tmp/testbed"):
         self.working_dir = working_dir
-        os.makedirs(working_dir, exist_ok=true)
+        os.makedirs(working_dir, exist_ok=True)
 
     def run(self, code: str, timeout: int = 30) -> tuple[str, int]:
         import subprocess
         import tempfile
-        with tempfile.namedtemporaryfile(mode='w', suffix='.py', delete=false, encoding='utf-8') as f:
+        with tempfile.namedtemporaryfile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
             f.write(code)
             temp_path = f.name
         try:
-            result = subprocess.run(['python', temp_path], capture_output=true, text=true, timeout=timeout)
+            result = subprocess.run(['python', temp_path], capture_output=True, text=True, timeout=timeout)
             return result.stdout + result.stderr, result.returncode
-        except subprocess.timeoutexpired:
+        except subprocess.TimeoutExpired:
             return f"execution timed out ({timeout}s)", -1
-        except exception as e:
+        except Exception as e:
             return f"error: {repr(e)}", -1
         finally:
-            with contextlib.suppress(oserror):
+            with contextlib.suppress(OSError):
                 os.unlink(temp_path)
 
 
 def _create_reward_func_from_rm(
-    reward_model: rewardmodel,
+    reward_model: RewardModel,
 ) -> callable[[list[str], list[str]], list[float]]:
-    """create a reward function compatible with grpotrainer from a rewardmodel instance."""
+    """create a reward function compatible with grpotrainer from a RewardModel instance."""
 
     def reward_func(completions: list[str], prompts: list[str]) -> list[float]:
         rewards = []
-        for completion, prompt in zip(completions, prompts, strict=false):
+        for completion, prompt in zip(completions, prompts, strict=False):
             task = prompt.strip()
             reward = reward_model.score(task, completion)
             rewards.append(reward)
@@ -1077,7 +968,7 @@ def _create_reward_func_from_rm(
     return reward_func
 
 
-def _load_model_and_tokenizer(config: rlhftrainingconfig):
+def _load_model_and_tokenizer(config: RLHFTrainingConfig):
     """load model and tokenizer with unsloth optimizations.
 
     uses fastlanguagemodel for efficient loading and optionally enables
@@ -1090,11 +981,11 @@ def _load_model_and_tokenizer(config: rlhftrainingconfig):
     # load tokenizer
     tokenizer = autotokenizer.from_pretrained(
         config.model_name_or_path,
-        trust_remote_code=true,
+        trust_remote_code=True,
     )
 
     # ensure tokenizer has pad_token (required for training)
-    if tokenizer.pad_token is none:
+    if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     # ensure padding side is set for training
@@ -1104,7 +995,7 @@ def _load_model_and_tokenizer(config: rlhftrainingconfig):
     model_kwargs = {
         "model": config.model_name_or_path,
         "max_seq_length": config.max_seq_length,
-        "load_in_4bit": true,
+        "load_in_4bit": True,
         "fast_inference": config.fast_inference,
     }
 
@@ -1143,12 +1034,12 @@ def _load_model_and_tokenizer(config: rlhftrainingconfig):
     return model, tokenizer, device
 
 
-def _create_grpo_config(config: rlhftrainingconfig):
-    """create trl grpoconfig from rlhftrainingconfig."""
+def _create_grpo_config(config: RLHFTrainingConfig):
+    """create trl grpoconfig from RLHFTrainingConfig."""
     try:
         from trl import grpoconfig
-    except importerror as e:
-        raise importerror("trl library required. install with: pip install trl") from e
+    except ImportError as e:
+        raise ImportError("trl library required. install with: pip install trl") from e
 
     max_prompt_length = config.max_seq_length // 2
     max_completion_length = config.max_seq_length - max_prompt_length
@@ -1180,12 +1071,12 @@ def _create_grpo_config(config: rlhftrainingconfig):
 
         # vllm
         use_vllm=config.use_vllm,
-        vllm_mode="colocate" if config.use_vllm else none,
+        vllm_mode="colocate" if config.use_vllm else None,
         vllm_gpu_memory_utilization=config.vllm_gpu_memory_utilization,
 
         # logging
         logging_steps=1,
-        log_completions=true,
+        log_completions=True,
 
         # save
         save_steps=config.max_steps // 10 or 10,
@@ -1198,10 +1089,10 @@ def _create_grpo_config(config: rlhftrainingconfig):
 
 
 def train(
-    config: rlhftrainingconfig,
-    product_manager: productmanager | none = none,
-    reward_model: rewardmodel | none = none,
-    ai_judge: aijudge | none = none,
+    config: RLHFTrainingConfig,
+    product_manager: ProductManager | None = None,
+    reward_model: RewardModel | None = None,
+    ai_judge: AIJudge | None = None,
 ) -> dict[str, any]:
     """run grpo training using unsloth's optimized grpotrainer.
 
@@ -1209,10 +1100,10 @@ def train(
     for accelerated rl training with vllm inference.
 
     args:
-        config: rlhftrainingconfig with model and training parameters
-        product_manager: optional productmanager for custom task prompts
-        reward_model: optional rewardmodel for sandbox-based reward scoring
-        ai_judge: optional aijudge for ai-judge-based reward scoring
+        config: RLHFTrainingConfig with model and training parameters
+        product_manager: optional ProductManager for custom task prompts
+        reward_model: optional RewardModel for sandbox-based reward scoring
+        ai_judge: optional AIJudge for ai-judge-based reward scoring
 
     returns:
         dict with training metrics and results
@@ -1223,7 +1114,7 @@ def train(
 
 
     random.seed(config.seed)
-    os.makedirs(config.output_dir, exist_ok=true)
+    os.makedirs(config.output_dir, exist_ok=True)
 
     # step 1: patch trl for unsloth grpo optimizations
     log.info("applying unsloth optimizations to trl...")
@@ -1231,7 +1122,7 @@ def train(
         from unsloth import fastlanguagemodel, patchfastrl
         patchfastrl(algorithm="grpo", fastlanguagemodel=fastlanguagemodel)
         log.info("unsloth patchfastrl applied successfully")
-    except importerror as e:
+    except ImportError as e:
         log.warning(f"could not apply patchfastrl: {e}. continuing with base unsloth.")
 
     # step 2: load model and tokenizer with lora
@@ -1239,13 +1130,13 @@ def train(
     log.info(f"model loaded on device: {device}")
 
     # step 3: prepare dataset for grpotrainer
-    pm = product_manager or productmanager()
-    rm = reward_model or rewardmodel()
+    pm = product_manager or ProductManager()
+    rm = reward_model or RewardModel()
 
     try:
         from datasets import dataset
-    except importerror as e:
-        raise importerror("datasets library required. install with: pip install datasets") from e
+    except ImportError as e:
+        raise ImportError("datasets library required. install with: pip install datasets") from e
 
     templates = pm.task_templates if pm.task_templates else pm._default_templates
     # grpotrainer needs 'prompt' field
@@ -1261,20 +1152,20 @@ def train(
     log.info(f"dataset prepared: {len(dataset)} samples ({config.num_generations} generations x {len(templates)} prompts)")
 
     # step 4: create reward function (sandbox or ai judge mode)
-    if config.mode == aitrainermode.ai_judge or ai_judge is not none:
+    if config.mode == AITrainerMode.ai_judge or ai_judge is not None:
         # ai judge mode
-        effective_judge = ai_judge or aijudge(
+        effective_judge = ai_judge or AIJudge(
             llm_name=config.judge_llm_name,
             criteria=config.judge_criteria,
             temperature=config.judge_temperature,
             base_url=config.judge_base_url,
         )
-        reward_func = aijudgerewardmodel(effective_judge, criteria=config.judge_criteria)
+        reward_func = AIJudgeRewardModel(effective_judge, criteria=config.judge_criteria)
         log.info(f"using ai judge reward: {config.judge_llm_name}")
         log.info(f"judge criteria: {config.judge_criteria or effective_judge.criteria}")
     else:
         # sandbox (default) mode
-        rm = reward_model or rewardmodel()
+        rm = reward_model or RewardModel()
         reward_func = _create_reward_func_from_rm(rm)  # type: ignore[assignment]
         log.info("using sandbox-based reward model")
 
@@ -1285,8 +1176,8 @@ def train(
     log.info("initializing grpotrainer...")
     try:
         from trl import grpotrainer
-    except importerror as e:
-        raise importerror("trl library required. install with: pip install trl") from e
+    except ImportError as e:
+        raise ImportError("trl library required. install with: pip install trl") from e
 
     trainer = grpotrainer(
         model=model,
@@ -1304,7 +1195,7 @@ def train(
     log.info("starting grpo training...")
     try:
         trainer.train()
-    except exception as e:
+    except Exception as e:
         log.error(f"training error: {e}")
         raise
 
@@ -1335,7 +1226,7 @@ def train(
     # save results
     results_path = os.path.join(config.output_dir, "training_results.json")
     with open(results_path, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2, ensure_ascii=false)
+        json.dump(results, f, indent=2, ensure_ascii=False)
     log.info(f"results saved to {results_path}")
 
     return results
@@ -1363,7 +1254,7 @@ class referencemodel:
         policy_logits = self.model(input_ids=input_ids, attention_mask=attention_mask).logits
         ref_log_probs = torch.nn.functional.log_softmax(ref_logits, dim=-1)
         policy_probs = torch.nn.functional.softmax(policy_logits, dim=-1)
-        kl = torch.nn.functional.kl_div(ref_log_probs, policy_probs, reduction='batchmean', log_target=true)
+        kl = torch.nn.functional.kl_div(ref_log_probs, policy_probs, reduction='batchmean', log_target=True)
         self._last_kl_float = kl.item()
         return kl
 
@@ -1390,11 +1281,11 @@ class replaybuffer:
             self.buffer.pop(0)
             self.advantages.pop(0)
 
-    def compute_advantages(self, baseline: float | none = none) -> list[float]:
+    def compute_advantages(self, baseline: float | None = None) -> list[float]:
         """compute advantages using mean rewards as baseline."""
         if not self.advantages:
             return []
-        if baseline is none:
+        if baseline is None:
             baseline = sum(self.advantages) / len(self.advantages)
         advantages = [r - baseline for r in self.advantages]
         mean_adv = sum(advantages) / len(advantages)
@@ -1480,7 +1371,7 @@ class data:
         self.data = []
         self.invalid_entries = []
         # 获取该类专属的 logger
-        self.logger = logging.getlogger(self.__class__.__name__)
+        self.logger = logging.getLogger(self.__class__.__name__)
         self._load_and_check()
 
     def _load_and_check(self):
@@ -1489,13 +1380,13 @@ class data:
                 content = f.read().strip()
                 if not content:
                     self.logger.error("文件为空: %s", self.data_file_location)
-                    raise valueerror("文件为空")
+                    raise ValueError("文件为空")
 
                 if content.startswith('['):
                     items = json.loads(content)
                     if not isinstance(items, list):
-                        raise valueerror("json 根节点不是数组")
-                    self._validate_items(items, from_array=true)
+                        raise ValueError("json 根节点不是数组")
+                    self._validate_items(items, from_array=True)
                 else:
                     f.seek(0)
                     for line_num, line in enumerate(f, start=1):
@@ -1506,16 +1397,16 @@ class data:
                             obj = json.loads(line)
                             self._validate_single(obj, line_num)
                             self.data.append(obj)
-                        except json.jsondecodeerror as e:
+                        except json.JSONDecodeError as e:
                             msg = f"第 {line_num} 行 json 解析错误: {e}"
                             self.logger.error(msg)
                             self.invalid_entries.append((line_num, msg))
-        except filenotfounderror as e:
+        except FileNotFoundError as e:
             self.logger.exception("文件不存在: %s", self.data_file_location)
             raise
-        except json.jsondecodeerror as e:
+        except json.JSONDecodeError as e:
             self.logger.exception("文件 json 解析失败")
-            raise valueerror(f"json 解析失败: {e}")
+            raise ValueError(f"json 解析失败: {e}")
 
     def _validate_single(self, item, line_info):
         if not isinstance(item, dict):
