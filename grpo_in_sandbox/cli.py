@@ -6,6 +6,7 @@
 - build: 构建Docker镜像
 - run: 运行智能体执行任务
 - benchmark: 运行基准测试
+- train: 运行GRPO训练
 
 使用方法：
     llm-in-sandbox build
@@ -830,6 +831,92 @@ def config(
         console.print(f"[dim]查找顺序: {DEFAULT_SETTINGS_LOCATIONS}[/dim]")
 
 
+def run_training(
+    model_name: str = "./model",
+    prompt: str | None = None,
+    prompt_file: str | None = None,
+    dataset_file: str | None = None,
+    dataset_format: str = "json",
+    output_dir: str = "./output",
+    max_steps: int = 100,
+    num_train_epochs: int = 3,
+    learning_rate: float = 5e-6,
+    lora_rank: int = 16,
+    per_device_train_batch_size: int = 4,
+    num_generations: int = 4,
+    max_seq_length: int = 2048,
+    temperature: float = 0.7,
+    use_vllm: bool = True,
+):
+    """Run GRPO training with the given configuration.
+
+    Trains a language model using GRPO (Group Relative Policy Optimization)
+    within a code sandbox environment.
+
+    Args:
+        model_name: HuggingFace model name or path (default: "./model")
+        prompt: Single training prompt. If not provided, uses default QA prompts.
+        prompt_file: Path to file with prompts (one per line).
+        dataset_file: Path to dataset file (JSON or CSV) for training prompts.
+        dataset_format: Format of dataset file: "json" or "csv" (default: "json").
+        output_dir: Output directory for trained model.
+        max_steps: Maximum training steps (default: 100).
+        num_train_epochs: Number of training epochs (default: 3).
+        learning_rate: Learning rate (default: 5e-6).
+        lora_rank: LoRA rank (default: 16).
+        per_device_train_batch_size: Per-device batch size (default: 4).
+        num_generations: Generations per prompt for GRPO (default: 4).
+        max_seq_length: Max sequence length (default: 2048).
+        temperature: Sampling temperature (default: 0.7).
+        use_vllm: Use vLLM fast inference (default: True).
+
+    Example:
+        llm-sandbox train --model_name Qwen/Qwen2.5-0.5B-Instruct --prompt "写一个排序函数" --max_steps 10
+        llm-sandbox train --model_name ./model --prompt_file prompts.txt --epochs 3
+        llm-sandbox train --model_name ./model --dataset_file data.json --dataset_format json
+    """
+    from grpo_in_sandbox import RLHFTrainingConfig, ProductManager, train
+
+    config = RLHFTrainingConfig(
+        model_name_or_path=model_name,
+        num_train_epochs=num_train_epochs,
+        max_steps=max_steps,
+        learning_rate=learning_rate,
+        lora_rank=lora_rank,
+        per_device_train_batch_size=per_device_train_batch_size,
+        num_generations=num_generations,
+        max_seq_length=max_seq_length,
+        temperature=temperature,
+        use_vllm=use_vllm,
+        output_dir=output_dir,
+    )
+
+    if dataset_file:
+        if dataset_format == "csv":
+            pm = ProductManager.from_csv(dataset_file)
+        else:
+            pm = ProductManager.from_json(dataset_file)
+    elif prompt:
+        pm = ProductManager(task_templates=[prompt])
+    elif prompt_file:
+        pm = ProductManager.from_file(prompt_file)
+    else:
+        pm = ProductManager()  # uses default Chinese QA templates
+
+    results = train(config, product_manager=pm)
+
+    # Print summary
+    console.print()
+    console.print(Panel.fit(
+        f"[bold green]✅ GRPO训练完成！[/bold green]",
+        border_style="green",
+    ))
+    console.print(f"模型: {results['config']['model_name_or_path']}")
+    console.print(f"输出目录: {results['output_dir']}")
+    console.print(f"最终检查点: {results['final_checkpoint']}")
+    return results
+
+
 def main():
     """
     CLI主入口点。
@@ -841,6 +928,7 @@ def main():
         "build": build_docker_image,
         "benchmark": run_benchmark,
         "config": config,
+        "train": run_training,
     })
 
 
