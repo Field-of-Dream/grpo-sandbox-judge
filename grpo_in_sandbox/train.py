@@ -20,6 +20,7 @@ from typing import Any, Optional, List
 import torch
 from transformers import AutoTokenizer
 from unsloth import FastLanguageModel
+from .runtime import _setup_logger
 
 
 logger = logging.getLogger(__name__)
@@ -441,13 +442,112 @@ class ProductManager:
             dataset with 'prompt' and 'question' fields.
         """
         try:
-            from datasets import dataset
+            from datasets import Dataset
         except ImportError as e:
             raise ImportError("datasets library required. install with: pip install datasets") from e
 
         templates = self.task_templates if self.task_templates else self._default_templates
         # use from_list to create dataset from list of prompts (each prompt is a row)
-        return dataset.from_list([{"prompt": t} for t in templates])
+        return Dataset.from_list([{"prompt": t} for t in templates])
+
+    @classmethod
+    def from_json(cls, file_path: str, prompt_field: str = "prompt") -> "ProductManager":
+        """Load prompts from a JSON file (array or JSONL format).
+
+        Supports:
+        - JSON array of objects: [{"prompt": "..."}, {"prompt": "..."}]
+        - JSON array of strings: ["prompt1", "prompt2"]
+        - JSON Lines (one JSON object per line)
+
+        Args:
+            file_path: Path to JSON file
+            prompt_field: Field name for prompt text (default: "prompt")
+                          Falls back to "question" if prompt_field not present.
+
+        Returns:
+            ProductManager instance
+        """
+        import json
+        templates = []
+        with open(file_path, encoding="utf-8") as f:
+            content = f.read().strip()
+        if content.startswith("["):
+            items = json.loads(content)
+            for item in items:
+                if isinstance(item, str):
+                    templates.append(item)
+                elif isinstance(item, dict):
+                    if prompt_field in item:
+                        templates.append(str(item[prompt_field]))
+                    elif "question" in item:
+                        templates.append(str(item["question"]))
+        else:
+            for line in content.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                if isinstance(obj, dict):
+                    if prompt_field in obj:
+                        templates.append(str(obj[prompt_field]))
+                    elif "question" in obj:
+                        templates.append(str(obj["question"]))
+        return cls(task_templates=templates)
+
+    @classmethod
+    def from_csv(cls, file_path: str, prompt_column: str = "prompt") -> "ProductManager":
+        """Load prompts from a CSV file.
+
+        Args:
+            file_path: Path to CSV file
+            prompt_column: Column name for prompt text (default: "prompt")
+                           Falls back to "question" if prompt_column not present.
+
+        Returns:
+            ProductManager instance
+        """
+        import csv
+        templates = []
+        with open(file_path, encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                val = row.get(prompt_column, "") or row.get("question", "") or ""
+                val = val.strip()
+                if val:
+                    templates.append(val)
+        return cls(task_templates=templates)
+
+    @classmethod
+    def from_hf_dataset(cls, dataset_name: str, split: str = "train", prompt_field: str = "prompt", max_samples: int | None = None) -> "ProductManager":
+        """Load prompts from a HuggingFace dataset.
+
+        Args:
+            dataset_name: HuggingFace dataset identifier (e.g., "databricks/databricks-dolly-15k")
+            split: Dataset split (default: "train")
+            prompt_field: Field name for prompt text (default: "prompt")
+            max_samples: Maximum number of samples to load (default: None = all)
+
+        Returns:
+            ProductManager instance
+        """
+        try:
+            from datasets import load_dataset
+        except ImportError as e:
+            raise ImportError("datasets library required. install with: pip install datasets") from e
+        ds = load_dataset(dataset_name, split=split)
+        if max_samples is not None:
+            ds = ds.select(range(min(max_samples, len(ds))))
+        templates = []
+        for item in ds:
+            if prompt_field in item and item[prompt_field] is not None:
+                templates.append(str(item[prompt_field]).strip())
+            elif "question" in item and item["question"] is not None:
+                templates.append(str(item["question"]).strip())
+            elif "text" in item and item["text"] is not None:
+                templates.append(str(item["text"]).strip())
+            elif "instruction" in item and item["instruction"] is not None:
+                templates.append(str(item["instruction"]).strip())
+        return cls(task_templates=templates)
 
 
 class RewardModel:
@@ -536,7 +636,7 @@ class RewardModel:
                 return 0.5
 
             # use tempfile to avoid file path conflicts in parallel execution
-            with tempfile.namedtemporaryfile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
                 test_file = f.name
                 f.write(test_code)
 
@@ -853,7 +953,7 @@ class AIJudgeRewardModel:
         return rewards
 
 
-class selfplaygrpo:
+class SelfPlayGRPO:
     """self-play grpo orchestrator: generate → judge → train iterative loop.
 
     this class orchestrates a complete self-play training loop where:
@@ -866,13 +966,13 @@ class selfplaygrpo:
 
     example:
         >>> config = RLHFTrainingConfig(
-        ...     mode=AITrainerMode.ai_judge,
+        ...     mode=AITrainerMode.AI_JUDGE,
         ...     model_name_or_path="qwen/qwen2.5-0.5b-instruct",
         ...     judge_llm_name="openai/gpt-4o-mini",
         ...     judge_criteria=["correctness", "clarity", "helpfulness"],
         ...     max_steps=50,
         ... )
-        >>> sp = selfplaygrpo(config)
+        >>> sp = SelfPlayGRPO(config)
         >>> results = sp.run()
     """
 
@@ -927,7 +1027,7 @@ class selfplaygrpo:
         return results
 
 
-class codeexecutor:
+class CodeExecutor:
     """executes code in local environment."""
 
     def __init__(self, working_dir: str = "/tmp/testbed"):
@@ -937,7 +1037,7 @@ class codeexecutor:
     def run(self, code: str, timeout: int = 30) -> tuple[str, int]:
         import subprocess
         import tempfile
-        with tempfile.namedtemporaryfile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
             f.write(code)
             temp_path = f.name
         try:
@@ -979,7 +1079,7 @@ def _load_model_and_tokenizer(config: RLHFTrainingConfig):
     log = _setup_logger(__name__)
 
     # load tokenizer
-    tokenizer = autotokenizer.from_pretrained(
+    tokenizer = AutoTokenizer.from_pretrained(
         config.model_name_or_path,
         trust_remote_code=True,
     )
@@ -1003,7 +1103,7 @@ def _load_model_and_tokenizer(config: RLHFTrainingConfig):
     if config.fast_inference:
         model_kwargs["gpu_memory_utilization"] = config.vllm_gpu_memory_utilization
 
-    model, _ = fastlanguagemodel.from_pretrained(**model_kwargs)
+    model, _ = FastLanguageModel.from_pretrained(**model_kwargs)
 
     # apply lora peft adapter
     lora_kwargs = {
@@ -1024,7 +1124,7 @@ def _load_model_and_tokenizer(config: RLHFTrainingConfig):
             "gate_proj", "up_proj", "down_proj",
         ]
 
-    model = fastlanguagemodel.get_peft_model(**lora_kwargs)
+    model = FastLanguageModel.get_peft_model(**lora_kwargs)
     model = model.to(device)
 
     log.info(f"model loaded with lora (rank={config.lora_rank}) on {device}")
@@ -1037,14 +1137,14 @@ def _load_model_and_tokenizer(config: RLHFTrainingConfig):
 def _create_grpo_config(config: RLHFTrainingConfig):
     """create trl grpoconfig from RLHFTrainingConfig."""
     try:
-        from trl import grpoconfig
+        from trl import GRPOConfig
     except ImportError as e:
         raise ImportError("trl library required. install with: pip install trl") from e
 
     max_prompt_length = config.max_seq_length // 2
     max_completion_length = config.max_seq_length - max_prompt_length
 
-    grpo_config = grpoconfig(
+    grpo_config = GRPOConfig(
         # output
         output_dir=config.output_dir,
         seed=config.seed,
@@ -1093,6 +1193,7 @@ def train(
     product_manager: ProductManager | None = None,
     reward_model: RewardModel | None = None,
     ai_judge: AIJudge | None = None,
+    dataset: Any | None = None,
 ) -> dict[str, any]:
     """run grpo training using unsloth's optimized grpotrainer.
 
@@ -1104,6 +1205,7 @@ def train(
         product_manager: optional ProductManager for custom task prompts
         reward_model: optional RewardModel for sandbox-based reward scoring
         ai_judge: optional AIJudge for ai-judge-based reward scoring
+        dataset: optional pre-built HuggingFace Dataset for training
 
     returns:
         dict with training metrics and results
@@ -1119,8 +1221,8 @@ def train(
     # step 1: patch trl for unsloth grpo optimizations
     log.info("applying unsloth optimizations to trl...")
     try:
-        from unsloth import fastlanguagemodel, patchfastrl
-        patchfastrl(algorithm="grpo", fastlanguagemodel=fastlanguagemodel)
+        from unsloth import FastLanguageModel, patchfastrl
+        patchfastrl(algorithm="grpo", fastlanguagemodel=FastLanguageModel)
         log.info("unsloth patchfastrl applied successfully")
     except ImportError as e:
         log.warning(f"could not apply patchfastrl: {e}. continuing with base unsloth.")
@@ -1130,29 +1232,25 @@ def train(
     log.info(f"model loaded on device: {device}")
 
     # step 3: prepare dataset for grpotrainer
-    pm = product_manager or ProductManager()
-    rm = reward_model or RewardModel()
-
-    try:
-        from datasets import dataset
-    except ImportError as e:
-        raise ImportError("datasets library required. install with: pip install datasets") from e
-
-    templates = pm.task_templates if pm.task_templates else pm._default_templates
-    # grpotrainer needs 'prompt' field
-    dataset = dataset.from_dict({"prompt": templates})
-
-    # for grpotrainer, we need to duplicate prompts for num_generations
-    # the trainer handles generating multiple completions per prompt
-    all_prompts = []
-    for _ in range(config.num_generations):
-        all_prompts.extend(templates)
-    dataset = dataset.from_dict({"prompt": all_prompts})
-
-    log.info(f"dataset prepared: {len(dataset)} samples ({config.num_generations} generations x {len(templates)} prompts)")
+    if dataset is not None:
+        ds = dataset
+        log.info(f"using provided dataset with {len(ds)} samples")
+    else:
+        pm = product_manager or ProductManager()
+        rm = reward_model or RewardModel()
+        try:
+            from datasets import Dataset
+        except ImportError as e:
+            raise ImportError("datasets library required. install with: pip install datasets") from e
+        templates = pm.task_templates if pm.task_templates else pm._default_templates
+        all_prompts = []
+        for _ in range(config.num_generations):
+            all_prompts.extend(templates)
+        ds = Dataset.from_dict({"prompt": all_prompts})
+        log.info(f"dataset prepared: {len(ds)} samples ({config.num_generations} generations x {len(templates)} prompts)")
 
     # step 4: create reward function (sandbox or ai judge mode)
-    if config.mode == AITrainerMode.ai_judge or ai_judge is not None:
+    if config.mode == AITrainerMode.AI_JUDGE or ai_judge is not None:
         # ai judge mode
         effective_judge = ai_judge or AIJudge(
             llm_name=config.judge_llm_name,
@@ -1175,15 +1273,15 @@ def train(
     # step 6: initialize grpotrainer
     log.info("initializing grpotrainer...")
     try:
-        from trl import grpotrainer
+        from trl import GRPOTrainer
     except ImportError as e:
         raise ImportError("trl library required. install with: pip install trl") from e
 
-    trainer = grpotrainer(
+    trainer = GRPOTrainer(
         model=model,
         processing_class=tokenizer,
         args=grpo_config,
-        train_dataset=dataset,
+        train_dataset=ds,
         reward_funcs=reward_func,
     )
 
@@ -1249,8 +1347,21 @@ class referencemodel:
     def compute_kl_divergence(self, input_ids, attention_mask):
         """compute kl divergence between policy and reference model."""
         torch = self.torch
+        # Save current params, load reference params
+        old_params = {}
+        for name, param in self.model.named_parameters():
+            if name in self.reference_params:
+                old_params[name] = param.data.clone()
+                param.data = self.reference_params[name].to(param.device)
+
         with torch.no_grad():
             ref_logits = self.model(input_ids=input_ids, attention_mask=attention_mask).logits
+
+        # Restore current params
+        for name, param in self.model.named_parameters():
+            if name in old_params:
+                param.data = old_params[name]
+
         policy_logits = self.model(input_ids=input_ids, attention_mask=attention_mask).logits
         ref_log_probs = torch.nn.functional.log_softmax(ref_logits, dim=-1)
         policy_probs = torch.nn.functional.softmax(policy_logits, dim=-1)
@@ -1259,10 +1370,10 @@ class referencemodel:
         return kl
 
     def reset(self):
-        """reset reference model to original parameters."""
+        """update reference model to current policy parameters."""
         for name, param in self.model.named_parameters():
             if name in self.reference_params:
-                param.data = self.reference_params[name].to(param.device)
+                self.reference_params[name] = param.data.clone()
 
 
 class replaybuffer:
@@ -1324,8 +1435,8 @@ class grpooptimizer:
         self.device = next(model.parameters()).device
         self.beta = beta
         self.max_grad_norm = max_grad_norm
-        self.optimizer = torch.optim.adamw(model.parameters(), lr=lr, betas=(0.9, 0.999))
-        self.scheduler = torch.optim.lr_scheduler.linearlr(self.optimizer, start_factor=1.0, end_factor=0.1, total_iters=100)
+        self.optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999))
+        self.scheduler = torch.optim.lr_scheduler.LinearLR(self.optimizer, start_factor=1.0, end_factor=0.1, total_iters=100)
         self.reference_model = referencemodel(model, tokenizer)
 
     def compute_grpo_loss(self, input_ids, attention_mask, response_ids, advantages: list[float]) -> tuple[torch.tensor, dict[str, float]]:
