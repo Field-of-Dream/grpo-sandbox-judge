@@ -439,7 +439,7 @@ class Agent:
             done = False
 
             # Process each action (supports parallel tool calls)
-            for idx, (action, tool_call_id) in enumerate(zip(actions, tool_call_ids)):
+            for idx, (action, tool_call_id) in enumerate(zip(actions, tool_call_ids, strict=True)):
                 # Print action
                 action_text = f"[bold]{action.function_name}[/bold]"
                 if action.parameters:
