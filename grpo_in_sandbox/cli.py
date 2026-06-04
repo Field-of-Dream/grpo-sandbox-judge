@@ -908,7 +908,7 @@ def run_training(
     # Print summary
     console.print()
     console.print(Panel.fit(
-        f"[bold green]✅ GRPO训练完成！[/bold green]",
+        "[bold green]✅ GRPO训练完成！[/bold green]",
         border_style="green",
     ))
     console.print(f"模型: {results['config']['model_name_or_path']}")

@@ -9,13 +9,10 @@ import json
 import logging
 import os
 import random
-import re
-import subprocess
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Optional, List
+from typing import Any, List, Optional
 
 import torch
 from transformers import AutoTokenizer
@@ -260,17 +257,16 @@ class RLHFTrainingConfig:
     @classmethod
     def from_dict(cls, config_dict: dict) -> "RLHFTrainingConfig":
         """Create configuration from dictionary."""
-        # Extract mode if present (handle both str and enum)
-        mode = config_dict.pop("mode", None)
-        if mode is not None and isinstance(mode, str):
-            mode = AITrainerMode(mode)
+        # Work on a copy so the caller's dict is never mutated.
+        config_dict = dict(config_dict)
 
-        # Handle Optional fields that might be None
-        target_modules = config_dict.pop("target_modules", None)
-        judge_criteria = config_dict.pop("judge_criteria", None)
-        judge_base_url = config_dict.pop("judge_base_url", None)
+        # Normalize mode (accept both str and AITrainerMode), keeping it in the
+        # dict so it is not dropped before known_params is updated below.
+        mode = config_dict.get("mode")
+        if isinstance(mode, str):
+            config_dict["mode"] = AITrainerMode(mode)
 
-        # Filter to only known params
+        # Known params with defaults; provided values override below.
         known_params = {
             "model_name_or_path": "./model",
             "lora_rank": 16,
@@ -307,13 +303,15 @@ class RLHFTrainingConfig:
             "judge_base_url": None,
         }
 
-        # Override with provided values
-        known_params.update(config_dict)
+        # Override defaults with provided values, ignoring unknown keys.
+        for key, value in config_dict.items():
+            if key in known_params:
+                known_params[key] = value
 
-        # Ensure required fields are present
-        if "model_name_or_path" not in known_params:
+        # Ensure required fields are present / valid.
+        if not known_params.get("model_name_or_path"):
             known_params["model_name_or_path"] = "./model"
-        if "mode" not in known_params or known_params["mode"] is None:
+        if not known_params.get("mode"):
             known_params["mode"] = AITrainerMode.SANDBOX
 
         return cls(**known_params)
@@ -999,7 +997,7 @@ class SelfPlayGRPO:
         self.reward_fn = AIJudgeRewardModel(self.judge, criteria=config.judge_criteria)
         self.log = _setup_logger("selfplaygrpo")
 
-    def run(self) -> dict[str, any]:
+    def run(self) -> dict[str, Any]:
         """run the self-play grpo training loop.
 
         returns:
@@ -1054,7 +1052,7 @@ class CodeExecutor:
 
 def _create_reward_func_from_rm(
     reward_model: RewardModel,
-) -> callable[[list[str], list[str]], list[float]]:
+) -> Callable[[list[str], list[str]], list[float]]:
     """create a reward function compatible with grpotrainer from a RewardModel instance."""
 
     def reward_func(completions: list[str], prompts: list[str]) -> list[float]:
@@ -1194,7 +1192,7 @@ def train(
     reward_model: RewardModel | None = None,
     ai_judge: AIJudge | None = None,
     dataset: Any | None = None,
-) -> dict[str, any]:
+) -> dict[str, Any]:
     """run grpo training using unsloth's optimized grpotrainer.
 
     this function uses trl's grpotrainer with unsloth's patchfastrl optimizations
@@ -1381,10 +1379,10 @@ class replaybuffer:
 
     def __init__(self, max_size: int = 10000):
         self.max_size = max_size
-        self.buffer: list[dict[str, any]] = []
+        self.buffer: list[dict[str, Any]] = []
         self.advantages: list[float] = []
 
-    def add(self, trajectory: dict[str, any], reward: float):
+    def add(self, trajectory: dict[str, Any], reward: float):
         """add a trajectory to the buffer."""
         self.buffer.append(trajectory)
         self.advantages.append(reward)
@@ -1405,7 +1403,7 @@ class replaybuffer:
             advantages = [(a - mean_adv) / std_adv for a in advantages]
         return advantages
 
-    def sample(self, batch_size: int) -> list[dict[str, any]]:
+    def sample(self, batch_size: int) -> list[dict[str, Any]]:
         """sample a batch from the buffer."""
         if len(self.buffer) <= batch_size:
             return self.buffer.copy()
@@ -1439,7 +1437,7 @@ class grpooptimizer:
         self.scheduler = torch.optim.lr_scheduler.LinearLR(self.optimizer, start_factor=1.0, end_factor=0.1, total_iters=100)
         self.reference_model = referencemodel(model, tokenizer)
 
-    def compute_grpo_loss(self, input_ids, attention_mask, response_ids, advantages: list[float]) -> tuple[torch.tensor, dict[str, float]]:
+    def compute_grpo_loss(self, input_ids, attention_mask, response_ids, advantages: list[float]) -> tuple[torch.Tensor, dict[str, float]]:
         """compute grpo loss."""
         torch = self.torch
         f = torch.nn.functional
@@ -1506,18 +1504,30 @@ class data:
                             continue
                         try:
                             obj = json.loads(line)
+                            before = len(self.invalid_entries)
                             self._validate_single(obj, line_num)
-                            self.data.append(obj)
+                            if len(self.invalid_entries) == before:
+                                self.data.append(obj)
                         except json.JSONDecodeError as e:
                             msg = f"第 {line_num} 行 json 解析错误: {e}"
                             self.logger.error(msg)
                             self.invalid_entries.append((line_num, msg))
-        except FileNotFoundError as e:
+        except FileNotFoundError:
             self.logger.exception("文件不存在: %s", self.data_file_location)
             raise
         except json.JSONDecodeError as e:
             self.logger.exception("文件 json 解析失败")
             raise ValueError(f"json 解析失败: {e}")
+
+    def _validate_items(self, items, from_array: bool = False):
+        """validate a list of parsed items, collecting valid ones into self.data."""
+        for idx, item in enumerate(items, start=1):
+            line_info = f"数组索引 {idx}" if from_array else idx
+            before = len(self.invalid_entries)
+            self._validate_single(item, line_info)
+            # only keep items that passed validation (no new invalid entry recorded)
+            if len(self.invalid_entries) == before:
+                self.data.append(item)
 
     def _validate_single(self, item, line_info):
         if not isinstance(item, dict):

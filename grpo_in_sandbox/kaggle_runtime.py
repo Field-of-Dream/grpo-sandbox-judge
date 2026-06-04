@@ -5,7 +5,6 @@ Kaggle 运行时模块 - 在 Kaggle 环境中执行命令
 """
 
 import contextlib
-import logging
 import os
 import shutil
 import subprocess
