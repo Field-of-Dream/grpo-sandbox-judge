@@ -6,7 +6,7 @@ Provides functions to load and manage prompt templates and agent configurations.
 
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
@@ -21,7 +21,7 @@ class AgentConfig:
     output_dir: str = "/testbed/output"
     max_steps: int = 30
     max_token_limit: int = 65536
-    extra_body: Optional[Dict[str, Any]] = None
+    extra_body: dict[str, Any] | None = None
 
     def format_system_prompt(self, **kwargs: Any) -> str:
         return self.system_prompt.format(**kwargs)
@@ -50,7 +50,7 @@ def get_default_config_path() -> str:
     return os.path.join(base_dir, "config", "general.yaml")
 
 
-def load_config(config_path: Optional[str] = None) -> AgentConfig:
+def load_config(config_path: str | None = None) -> AgentConfig:
     """Load configuration from path or use default."""
     if config_path is None:
         config_path = get_default_config_path()

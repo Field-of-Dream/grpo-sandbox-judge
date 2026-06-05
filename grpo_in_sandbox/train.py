@@ -12,13 +12,13 @@ import random
 import tempfile
 from collections.abc import Callable
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any
 
 import torch
 from transformers import AutoTokenizer
 from unsloth import FastLanguageModel
-from .runtime import _setup_logger
 
+from .runtime import _setup_logger
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ class RLHFTrainingConfig:
         lora_rank: int = 16,
         lora_alpha: int = 16,
         lora_dropout: float = 0.0,
-        target_modules: Optional[List[str]] = None,
+        target_modules: list[str] | None = None,
         # 优化器设置
         learning_rate: float = 5e-6,
         beta: float = 0.001,
@@ -72,9 +72,9 @@ class RLHFTrainingConfig:
         # AI 评判模式
         mode: AITrainerMode = AITrainerMode.SANDBOX,
         judge_llm_name: str = "openai/gpt-4o-mini",
-        judge_criteria: Optional[List[str]] = None,
+        judge_criteria: list[str] | None = None,
         judge_temperature: float = 0.1,
-        judge_base_url: Optional[str] = None,
+        judge_base_url: str | None = None,
     ):
         '''
         此部分使用config.xxx更改参数
@@ -113,7 +113,7 @@ class RLHFTrainingConfig:
         self.judge_criteria = judge_criteria
         self.judge_temperature = judge_temperature
         self.judge_base_url = judge_base_url
-        
+
     def __repr__(self) -> str:
         return (
             f"RLHFTrainingConfig("
@@ -427,6 +427,11 @@ class ProductManager:
     @property
     def templates(self) -> list[str]:
         """get all available templates."""
+        return self.task_templates if self.task_templates else self._default_templates
+
+    @property
+    def effective_templates(self) -> list[str]:
+        """Return task templates, falling back to defaults if none provided."""
         return self.task_templates if self.task_templates else self._default_templates
 
     def __len__(self) -> int:
@@ -1240,7 +1245,7 @@ def train(
             from datasets import Dataset
         except ImportError as e:
             raise ImportError("datasets library required. install with: pip install datasets") from e
-        templates = pm.task_templates if pm.task_templates else pm._default_templates
+        templates = pm.effective_templates
         all_prompts = []
         for _ in range(config.num_generations):
             all_prompts.extend(templates)
@@ -1363,7 +1368,7 @@ class referencemodel:
         policy_logits = self.model(input_ids=input_ids, attention_mask=attention_mask).logits
         ref_log_probs = torch.nn.functional.log_softmax(ref_logits, dim=-1)
         policy_probs = torch.nn.functional.softmax(policy_logits, dim=-1)
-        kl = torch.nn.functional.kl_div(ref_log_probs, policy_probs, reduction='batchmean', log_target=True)
+        kl = torch.nn.functional.kl_div(ref_log_probs, policy_probs, reduction='batchmean', log_target=False)
         self._last_kl_float = kl.item()
         return kl
 
@@ -1425,7 +1430,7 @@ class grpooptimizer:
     grpo training with vllm acceleration and proper reference model support.
     """
 
-    def __init__(self, model, tokenizer, beta: float = 0.01, lr: float = 1e-5, max_grad_norm: float = 1.0):
+    def __init__(self, model, tokenizer, beta: float = 0.01, lr: float = 1e-5, max_grad_norm: float = 0.1):
         import torch
         self.model = model
         self.tokenizer = tokenizer
@@ -1485,7 +1490,7 @@ class data:
 
     def _load_and_check(self):
         try:
-            with open(self.data_file_location, 'r', encoding='utf-8') as f:
+            with open(self.data_file_location, encoding='utf-8') as f:
                 content = f.read().strip()
                 if not content:
                     self.logger.error("文件为空: %s", self.data_file_location)
@@ -1517,7 +1522,7 @@ class data:
             raise
         except json.JSONDecodeError as e:
             self.logger.exception("文件 json 解析失败")
-            raise ValueError(f"json 解析失败: {e}")
+            raise ValueError(f"json 解析失败: {e}") from e
 
     def _validate_items(self, items, from_array: bool = False):
         """validate a list of parsed items, collecting valid ones into self.data."""

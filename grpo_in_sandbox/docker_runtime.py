@@ -11,11 +11,11 @@ import tarfile
 import docker
 import docker.errors
 
-from . import CMD_TIMEOUT, DOCKER_PATH
 from .agent import get_logger
+from .runtime import CMD_TIMEOUT, DOCKER_PATH, BaseRuntime
 
 
-class DockerRuntime:
+class DockerRuntime(BaseRuntime):
     """Docker运行时 - 管理容器生命周期和执行命令。"""
 
     def __init__(
@@ -136,7 +136,7 @@ class DockerRuntime:
             output = re.sub(r"\x1b\[[0-9;]*m|\r", "", output)
 
             if exit_code != 0:
-                return output, f"Error: Exit code {exit_code}"
+                return output, str(exit_code)
 
             return output, str(exit_code)
 
@@ -180,7 +180,7 @@ class DockerRuntime:
             stderr = re.sub(r"\x1b\[[0-9;]*m|\r", "", stderr)
 
             if exit_code != 0:
-                return stdout, stderr, f"Error: Exit code {exit_code}"
+                return stdout, stderr, str(exit_code)
 
             return stdout, stderr, str(exit_code)
 

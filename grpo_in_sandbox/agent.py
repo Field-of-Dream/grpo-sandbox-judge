@@ -16,7 +16,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import litellm
 from rich.console import Console
@@ -96,11 +96,11 @@ class AgentArgs:
     system_prompt: str  # System prompt for LLM
     instance_prompt: str  # Task prompt for this session
     llm_name: str  # Model name for litellm
-    llm_base_url: Optional[str] = None  # Custom API base URL
+    llm_base_url: str | None = None  # Custom API base URL
     max_retries: int = 5  # Max API retry attempts
     save_litellm_response: bool = False  # Save LLM responses
-    output_dir: Optional[str] = None  # Output directory
-    extra_body: Optional[Dict[str, Any]] = None  # Extra API params
+    output_dir: str | None = None  # Output directory
+    extra_body: dict[str, Any] | None = None  # Extra API params
     quiet: bool = False  # Suppress output for benchmarks
 
 
@@ -129,8 +129,12 @@ class Agent:
             self.logger.setLevel(logging.WARNING)
 
         self.llm_base_url = args.llm_base_url
-        if self.llm_base_url is None and ("openai/" in self.llm_name or "hosted_vllm" in self.llm_name):
-            self.llm_base_url = os.environ.get("LLM_BASE_URL", "http://localhost:8000/v1")
+        if self.llm_base_url is None:
+            env_base_url = os.environ.get("LLM_BASE_URL")
+            if env_base_url:
+                self.llm_base_url = env_base_url
+            elif "hosted_vllm" in self.llm_name:
+                self.llm_base_url = "http://localhost:8000/v1"
 
         self.system_prompt_template = args.system_prompt
         self.instance_prompt_template = args.instance_prompt
@@ -147,8 +151,8 @@ class Agent:
         if self.save_litellm_response:
             self.logger.info(f"📝 Save LiteLLM response enabled, output_dir: {self.output_dir}")
 
-        self.trajectory_steps: List[TrajectoryStep] = []
-        self.history: List[Dict[str, str]] = []
+        self.trajectory_steps: list[TrajectoryStep] = []
+        self.history: list[dict[str, str]] = []
 
     def get_console_output(self) -> str:
         """Get captured console output (only available in quiet mode)."""
@@ -161,7 +165,7 @@ class Agent:
         self.trajectory_steps = []
         self.history = []
 
-    def _count_tokens(self, messages: List[Dict[str, str]]) -> int:
+    def _count_tokens(self, messages: list[dict[str, str]]) -> int:
         """Count tokens in messages."""
         try:
             return litellm.token_counter(model=self.llm_name, messages=messages)
@@ -172,11 +176,11 @@ class Agent:
 
     def model_query(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         temperature: float = 1.0,
         max_tokens_per_call: int = 65536,
         max_token_limit: int = 65536,
-    ) -> Tuple[Any, float]:
+    ) -> tuple[Any, float]:
         """向 LLM 发送查询请求，支持自动重试和 token 限制处理。"""
         tools = [str_replace_editor_tool, execute_bash_tool, submit_tool]
 
@@ -278,7 +282,7 @@ class Agent:
         exec_time = time.time() - start_time
         return response, exec_time
 
-    def _save_litellm_response(self, messages: List[dict], response, extra_params: dict, kwargs: dict):
+    def _save_litellm_response(self, messages: list[dict], response, extra_params: dict, kwargs: dict):
         """Save litellm request and response to output_dir for debugging."""
         try:
             self.llm_call_count += 1
@@ -313,25 +317,33 @@ class Agent:
         except Exception as e:
             self.logger.warning(f"Failed to save litellm response: {e}")
 
-    def parse_response(self, response) -> Tuple[str, List[Action], List[Optional[str]]]:
+    def parse_response(self, response) -> tuple[str, list[Action], list[str | None]]:
         """从 LLM 响应中提取 thought、action 和 tool_call_id。"""
-        thought = response.choices[0].message.content or ""
+        message = response.choices[0].message
+        thought = message.content or ""
 
         actions = []
         tool_call_ids = []
-        try:
-            for tool_call in response.choices[0].message.tool_calls:
+        for tool_call in getattr(message, "tool_calls", None) or []:
+            try:
                 action = Action(
                     function_name=tool_call.function.name,
                     parameters=json.loads(tool_call.function.arguments),
                 )
                 actions.append(action)
                 tool_call_ids.append(tool_call.id)
-        except Exception:
-            actions = []
-            tool_call_ids = []
+            except Exception as e:
+                self.logger.warning(f"Failed to parse tool call: {e}")
 
         return thought, actions, tool_call_ids
+
+    def _message_to_history_dict(self, message) -> dict:
+        """Convert a LiteLLM message object into an API-compatible history dict."""
+        if hasattr(message, 'model_dump'):
+            return message.model_dump(exclude_none=True)
+        if hasattr(message, 'to_dict'):
+            return message.to_dict()
+        return dict(message)
 
     def run(
         self,
@@ -383,10 +395,10 @@ class Agent:
             self.console.print()
             self.console.rule(f"[bold blue]Step {step_count + 1}/{max_steps}[/bold blue]", style="blue")
 
-            # Add step count message to history
+            # Add step count message to history without mutating prior tool results.
             steps_remaining = max_steps - step_count
             step_msg = f"Steps Remaining: {steps_remaining}"
-            self.history[-1]["content"] += f"\n{step_msg}"
+            self.history.append({"role": "user", "content": step_msg})
             self.logger.info(step_msg)
 
             messages = self.history.copy()
@@ -424,6 +436,8 @@ class Agent:
 
             # Parse response
             thought, actions, tool_call_ids = self.parse_response(response)
+            assistant_msg_dict = self._message_to_history_dict(response.choices[0].message)
+            self.history.append(assistant_msg_dict)
 
             # Print thought
             if thought:
@@ -435,8 +449,28 @@ class Agent:
                     padding=(0, 1),
                 ))
 
-            # Track if any action leads to submission
-            done = False
+            if not actions:
+                from .observation import CONTINUE_MSG
+
+                self.console.print(Panel(
+                    escape(CONTINUE_MSG.strip()),
+                    title="[bold green]馃憗 OBSERVATION[/bold green]",
+                    border_style="green",
+                    padding=(0, 1),
+                ))
+                self.trajectory_steps.append(TrajectoryStep(
+                    thought=thought,
+                    reasoning_content=reasoning_content,
+                    action={},
+                    observation=CONTINUE_MSG,
+                    metadata={"step": step_count + 1, "exec_time": exec_time},
+                ))
+                self.history.append({
+                    "role": "user",
+                    "content": CONTINUE_MSG,
+                })
+                step_count += 1
+                continue
 
             # Process each action (supports parallel tool calls)
             for idx, (action, tool_call_id) in enumerate(zip(actions, tool_call_ids, strict=True)):
@@ -466,26 +500,17 @@ class Agent:
                     padding=(0, 1),
                 ))
 
-                # Record step (only for first action to avoid duplicates)
-                if idx == 0:
-                    step_record = TrajectoryStep(
-                        thought=thought,
-                        reasoning_content=reasoning_content,
-                        action=action.to_dict(),
-                        observation=observation,
-                        metadata={"step": step_count + 1, "exec_time": exec_time},
-                    )
-                    self.trajectory_steps.append(step_record)
-
-                # Update history
-                assistant_msg = response.choices[0].message
-                if hasattr(assistant_msg, 'model_dump'):
-                    assistant_msg_dict = assistant_msg.model_dump(exclude_none=True)
-                elif hasattr(assistant_msg, 'to_dict'):
-                    assistant_msg_dict = assistant_msg.to_dict()
-                else:
-                    assistant_msg_dict = dict(assistant_msg)
-                self.history.append(assistant_msg_dict)
+                self.trajectory_steps.append(TrajectoryStep(
+                    thought=thought,
+                    reasoning_content=reasoning_content,
+                    action=action.to_dict(),
+                    observation=observation,
+                    metadata={
+                        "step": step_count + 1,
+                        "action_index": idx,
+                        "exec_time": exec_time,
+                    },
+                ))
 
                 # Add tool result or CONTINUE_MSG
                 if action.function_name and tool_call_id:
@@ -531,10 +556,14 @@ class Agent:
             if not command:
                 return "Error: No command provided."
             stdout, stderr, exit_code = runtime.demux_run(command)
+            try:
+                error_code_int = int(exit_code)
+            except (ValueError, TypeError):
+                error_code_int = -1
 
             obs = Observation(
                 bash_output=stdout + stderr,
-                error_code=exit_code,
+                error_code=error_code_int,
                 action=action,
                 stdout=stdout,
                 stderr=stderr,
@@ -729,8 +758,8 @@ class AgentRegistry:
     """Agent注册表 - 管理多个Agent实例"""
 
     def __init__(self):
-        self._agents: Dict[str, Agent] = {}
-        self._factories: Dict[str, Callable] = {}
+        self._agents: dict[str, Agent] = {}
+        self._factories: dict[str, Callable] = {}
 
     def register(self, name: str, agent: 'Agent'):
         """注册一个Agent实例"""
@@ -751,11 +780,11 @@ class AgentRegistry:
             return factory(**kwargs)
         return None
 
-    def list_agents(self) -> List[str]:
+    def list_agents(self) -> list[str]:
         """列出所有已注册的Agent"""
         return list(self._agents.keys())
 
-    def list_factories(self) -> List[str]:
+    def list_factories(self) -> list[str]:
         """列出所有已注册的工厂"""
         return list(self._factories.keys())
 
@@ -774,8 +803,8 @@ _global_registry = AgentRegistry()
 
 def _create_agent_factory(agent_type: str):
     """创建指定类型Agent的工厂函数"""
-    def factory(llm_name: str, llm_base_url: Optional[str] = None,
-        system_prompt: Optional[str] = None, instance_prompt: Optional[str] = None,
+    def factory(llm_name: str, llm_base_url: str | None = None,
+        system_prompt: str | None = None, instance_prompt: str | None = None,
         quiet: bool = False, **kwargs) -> 'Agent':
         prompts = {
             "coder": ("""你是一个专业的Coder Agent，专注于编写高质量的代码。\n\n<CAPABILITIES>\n- 编写Python、JavaScript、Java、C++、Go、Rust等多种编程语言\n- 代码重构和优化\n- 调试和bug修复\n- 单元测试编写\n- 代码审查\n</CAPABILITIES>\n\n<TOOLS>\n- execute_bash: 执行shell命令和脚本\n- str_replace_editor: 查看、创建和编辑文件\n- submit: 提交完成的任务\n</TOOLS>\n\n<WORKFLOW>\n1. 理解需求并分析问题\n2. 设计代码结构和算法\n3. 编写代码并测试\n4. 调试和优化\n5. 提交完成的任务\n</WORKFLOW>""",
@@ -800,33 +829,33 @@ def _create_agent_factory(agent_type: str):
     return factory
 
 
-def create_coder_agent(llm_name: str, llm_base_url: Optional[str] = None,
-    system_prompt: Optional[str] = None, instance_prompt: Optional[str] = None,
+def create_coder_agent(llm_name: str, llm_base_url: str | None = None,
+    system_prompt: str | None = None, instance_prompt: str | None = None,
     quiet: bool = False, **kwargs) -> 'Agent':
     return _create_agent_factory("coder")(llm_name, llm_base_url, system_prompt, instance_prompt, quiet, **kwargs)
 
 
-def create_analyzer_agent(llm_name: str, llm_base_url: Optional[str] = None,
-    system_prompt: Optional[str] = None, instance_prompt: Optional[str] = None,
+def create_analyzer_agent(llm_name: str, llm_base_url: str | None = None,
+    system_prompt: str | None = None, instance_prompt: str | None = None,
     quiet: bool = False, **kwargs) -> 'Agent':
     return _create_agent_factory("analyzer")(llm_name, llm_base_url, system_prompt, instance_prompt, quiet, **kwargs)
 
 
-def create_research_agent(llm_name: str, llm_base_url: Optional[str] = None,
-    system_prompt: Optional[str] = None, instance_prompt: Optional[str] = None,
+def create_research_agent(llm_name: str, llm_base_url: str | None = None,
+    system_prompt: str | None = None, instance_prompt: str | None = None,
     quiet: bool = False, **kwargs) -> 'Agent':
     return _create_agent_factory("research")(llm_name, llm_base_url, system_prompt, instance_prompt, quiet, **kwargs)
 
 
-def create_general_agent(llm_name: str, llm_base_url: Optional[str] = None,
-    system_prompt: Optional[str] = None, instance_prompt: Optional[str] = None,
+def create_general_agent(llm_name: str, llm_base_url: str | None = None,
+    system_prompt: str | None = None, instance_prompt: str | None = None,
     quiet: bool = False, **kwargs) -> 'Agent':
     return _create_agent_factory("general")(llm_name, llm_base_url, system_prompt, instance_prompt, quiet, **kwargs)
 
 
 def create_agent(agent_type: str = "general", llm_name: str = "openai/gpt-4",
-    llm_base_url: Optional[str] = None, system_prompt: Optional[str] = None,
-    instance_prompt: Optional[str] = None, **kwargs) -> 'Agent':
+    llm_base_url: str | None = None, system_prompt: str | None = None,
+    instance_prompt: str | None = None, **kwargs) -> 'Agent':
     """创建Agent的工厂函数，支持coder/analyzer/research/general类型"""
     factories = {
         "coder": create_coder_agent,

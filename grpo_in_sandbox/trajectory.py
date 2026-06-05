@@ -5,7 +5,7 @@
 每一步操作、思考、动作和观察结果。
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -23,11 +23,11 @@ class TrajectoryStep(BaseModel):
     """
     thought: str = ""
     reasoning_content: str = ""
-    action: Dict[str, Any] = Field(default_factory=dict)
+    action: dict[str, Any] = Field(default_factory=dict)
     observation: str = ""
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """
         将步骤转换为字典格式。
 
@@ -55,12 +55,12 @@ class Trajectory(BaseModel):
         test_output: 测试输出（可选）
     """
     problem_statement: str
-    steps: List[TrajectoryStep] = Field(default_factory=list)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    reward_calc_time: Optional[float] = None
-    test_output: Optional[str] = None
+    steps: list[TrajectoryStep] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    reward_calc_time: float | None = None
+    test_output: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """
         将轨迹转换为字典格式。
 

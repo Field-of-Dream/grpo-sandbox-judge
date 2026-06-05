@@ -11,9 +11,10 @@ import subprocess
 import tempfile
 
 from .agent import get_logger
+from .runtime import BaseRuntime
 
 
-class KaggleRuntime:
+class KaggleRuntime(BaseRuntime):
     """
     Kaggle 运行时 - 在 Kaggle Notebook 环境中执行命令。
 

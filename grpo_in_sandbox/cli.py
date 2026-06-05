@@ -875,7 +875,7 @@ def run_training(
         llm-sandbox train --model_name ./model --prompt_file prompts.txt --epochs 3
         llm-sandbox train --model_name ./model --dataset_file data.json --dataset_format json
     """
-    from grpo_in_sandbox import RLHFTrainingConfig, ProductManager, train
+    from grpo_in_sandbox import ProductManager, RLHFTrainingConfig, train
 
     config = RLHFTrainingConfig(
         model_name_or_path=model_name,

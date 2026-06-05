@@ -45,6 +45,7 @@ grpo_in_sandbox-0.2.0-py3-none-any.whl
 mypy_errors.txt
 logs_*/
 .sisyphus/
+.omo/
 logs_*
 output*
 temp_extract/
