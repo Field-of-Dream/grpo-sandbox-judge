@@ -1,16 +1,14 @@
 """Runtime Module - Unified sandbox runtime abstraction (Docker/Kaggle/Local)."""
 
-import contextlib
 import logging
 import os
 import shutil
 import subprocess
-import tempfile
 from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
 
-
+#输出日志的设置，日志级别为INFO，输出格式为时间、模块名、日志级别和消息内容
 def _setup_logger(name: str, level: int = logging.INFO) -> logging.Logger:
     log = logging.getLogger(name)
     if not log.handlers:
@@ -91,6 +89,9 @@ class LocalRuntime(BaseRuntime):
         shutil.copy2(src_path, dest_path)
 
     def copy_from_container(self, container_path: str, local_path: str):
+        local_dir = os.path.dirname(local_path)
+        if local_dir:
+            os.makedirs(local_dir, exist_ok=True)
         shutil.copy2(container_path, local_path)
 
 
@@ -105,6 +106,7 @@ class DockerRuntime(BaseRuntime):
 
     def run(self, code, timeout=30, workdir=None):
         return self._runtime.run(code, timeout, workdir)
+        #定义在ducker运行的时候的参数
 
     def demux_run(self, code, timeout=30, workdir=None):
         return self._runtime.demux_run(code, timeout, workdir)
@@ -120,62 +122,34 @@ class DockerRuntime(BaseRuntime):
 
 
 class KaggleRuntime(BaseRuntime):
-    """Kaggle runtime - runs commands in Kaggle notebooks."""
+    """Kaggle runtime - delegates to kaggle_runtime.KaggleRuntime."""
 
-    def __init__(self, working_dir: str = "/kaggle/working"):
-        self.working_dir = working_dir
-        os.makedirs(working_dir, exist_ok=True)
-        self._exec_history: list[dict[str, str]] = []
+    def __init__(self, working_dir: str | None = None, logger=None):
+        from grpo_in_sandbox.kaggle_runtime import KaggleRuntime as _Kaggle
 
-    def _run_code(self, code: str, timeout: int = 30) -> str:
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
-            f.write(code)
-            temp_path = f.name
+        self._runtime = _Kaggle(working_dir=working_dir, logger=logger)
+        self.working_dir = self._runtime.working_dir
 
-        try:
-            result = subprocess.run(
-                ['python', temp_path],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=self.working_dir,
-            )
-            output = result.stdout + result.stderr
-            self._exec_history.append({"code": code[:100], "output": output[:500]})
-            return output
-        finally:
-            with contextlib.suppress(OSError):
-                os.unlink(temp_path)
+    def run(self, code: str, timeout: int = 30, workdir: str | None = None):
+        return self._runtime.run(code, timeout, workdir)
 
-    def run(self, code: str, timeout: int = 30, workdir: str | None = None) -> tuple[str, str]:
-        try:
-            output = self._run_code(code, timeout)
-            return output, "0"
-        except subprocess.TimeoutExpired:
-            return f"Execution timed out ({timeout}s)", "-1"
-        except Exception as e:
-            return f"Error: {repr(e)}", "-1"
+    def demux_run(self, code: str, timeout: int = 30, workdir: str | None = None):
+        return self._runtime.demux_run(code, timeout, workdir)
 
-    def demux_run(self, code: str, timeout: int = 30, workdir: str | None = None) -> tuple[str, str, str]:
-        try:
-            output = self._run_code(code, timeout)
-            return output, "", "0"
-        except subprocess.TimeoutExpired:
-            return f"Execution timed out ({timeout}s)", "", "-1"
-        except Exception as e:
-            return f"Error: {repr(e)}", f"Error: {repr(e)}", "-1"
+    def run_python(self, code: str, timeout: int = 30):
+        return self._runtime.run_python(code, timeout)
 
     def close(self):
-        self._exec_history.clear()
+        self._runtime.close()
 
     def copy_to_container(self, src_path: str, dest_path: str):
-        dest_dir = os.path.dirname(dest_path)
-        if dest_dir:
-            os.makedirs(dest_dir, exist_ok=True)
-        shutil.copy2(src_path, dest_path)
+        self._runtime.copy_to_container(src_path, dest_path)
+
+    def copy_dir_to_container(self, src_dir: str, dest_dir: str):
+        self._runtime.copy_dir_to_container(src_dir, dest_dir)
 
     def copy_from_container(self, container_path: str, local_path: str):
-        shutil.copy2(container_path, local_path)
+        self._runtime.copy_from_container(container_path, local_path)
 
 
 def create_runtime(
@@ -213,7 +187,11 @@ def create_runtime(
         "local": LocalRuntime,
     }
 
-    runtime_class = backends.get(backend, LocalRuntime)
+    if backend not in backends:
+        available = ", ".join(["auto", *backends])
+        raise ValueError(f"Unknown runtime backend: {backend!r}. Available: {available}")
+
+    runtime_class = backends[backend]
     log.info(f"Created runtime: {runtime_class.__name__}")
 
     return runtime_class(**kwargs)

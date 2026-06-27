@@ -16,17 +16,6 @@ Usage:
 
 __version__ = "0.2.0"
 
-from .agent import Agent, AgentArgs
-from .agent_configs import (
-    DEFAULT_TEAM_TEMPLATES,
-    AgentProfile,
-    AgentTeam,
-    create_team_from_template,
-    load_team_from_yaml,
-    profile_to_agent_args,
-    run_agent_team,
-    save_team_to_yaml,
-)
 from .config import AgentConfig, load_config
 from .runtime import (
     CMD_TIMEOUT,
@@ -41,16 +30,44 @@ from .trajectory import Trajectory, TrajectoryStep
 
 
 def __getattr__(name):
-    """Lazy-load heavy training deps (torch, transformers, unsloth) only when accessed."""
-    _train_exports = {
-        "AITrainerMode", "AIJudge", "AIJudgeRewardModel",
-        "SelfPlayGRPO", "CodeExecutor", "ProductManager",
-        "RewardModel", "RLHFTrainingConfig", "train",
+    """Lazy-load optional subsystems only when their public exports are accessed."""
+    lazy_exports = {
+        "agent": {
+            "Agent",
+            "AgentArgs",
+        },
+        "agent_configs": {
+            "AgentProfile",
+            "AgentTeam",
+            "DEFAULT_TEAM_TEMPLATES",
+            "create_team_from_template",
+            "load_team_from_yaml",
+            "profile_to_agent_args",
+            "run_agent_team",
+            "save_team_to_yaml",
+        },
+        "train": {
+            "AITrainerMode",
+            "AIJudge",
+            "AIJudgeRewardModel",
+            "SelfPlayGRPO",
+            "CodeExecutor",
+            "ProductManager",
+            "RewardModel",
+            "RLHFTrainingConfig",
+            "train",
+        },
     }
-    if name in _train_exports:
-        import importlib
-        mod = importlib.import_module(".train", __package__)
-        return getattr(mod, name)
+
+    for module_name, exports in lazy_exports.items():
+        if name in exports:
+            import importlib
+
+            mod = importlib.import_module(f".{module_name}", __package__)
+            value = getattr(mod, name)
+            globals()[name] = value
+            return value
+
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [

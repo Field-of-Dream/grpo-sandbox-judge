@@ -170,7 +170,7 @@ def load_dataset_from_config(task_config: dict):
         data_files = task_config.get("data_files")
         if data_files and not Path(data_files).is_absolute():
             data_files = str(Path(__file__).parent / data_files)
-        ds = load_dataset("json", data_files=data_files, split="train")
+        ds = load_dataset("json", data_files=data_files, split=split)
     else:
         # 从HuggingFace加载
         config = task_config.get("config")
