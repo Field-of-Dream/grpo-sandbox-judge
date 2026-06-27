@@ -36,13 +36,13 @@ class KaggleRuntime:
 
     def __init__(
         self,
-        working_dir: str = "/tmp/testbed",
+        working_dir: str | None = None,
         logger=None,
     ):
-        self.working_dir = working_dir
-        os.makedirs(working_dir, exist_ok=True)
-        os.makedirs(os.path.join(working_dir, "input"), exist_ok=True)
-        os.makedirs(os.path.join(working_dir, "output"), exist_ok=True)
+        self.working_dir = working_dir or self._default_working_dir()
+        os.makedirs(self.working_dir, exist_ok=True)
+        os.makedirs(os.path.join(self.working_dir, "input"), exist_ok=True)
+        os.makedirs(os.path.join(self.working_dir, "output"), exist_ok=True)
 
         if logger is None:
             self.logger = get_logger("KaggleRuntime")
@@ -60,6 +60,13 @@ class KaggleRuntime:
 
         self.logger.info("Kaggle environment initialized")
         self.logger.info(f"Working directory: {self.working_dir}")
+
+    @staticmethod
+    def _default_working_dir() -> str:
+        """根据当前环境选择可写的默认工作目录。"""
+        if os.environ.get("KAGGLE_KERNEL_TYPE"):
+            return "/kaggle/working"
+        return "/tmp/testbed"
 
     def run(
         self,
@@ -100,6 +107,40 @@ class KaggleRuntime:
         except Exception as e:
             return f"Error: {repr(e)}", "-1"
 
+    def demux_run(
+        self,
+        code: str,
+        timeout: int = 60,
+        workdir: str | None = None,
+    ) -> tuple[str, str, str]:
+        """
+        执行命令并分离 stdout/stderr。
+
+        Returns:
+            (stdout, stderr, exit_code)
+        """
+        exec_workdir = self.working_dir if workdir is None else workdir
+
+        try:
+            result = subprocess.run(
+                ["bash", "-c", code],
+                cwd=exec_workdir,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+
+            if result.returncode != 0:
+                return result.stdout, result.stderr, f"Error: Exit code {result.returncode}"
+
+            return result.stdout, result.stderr, str(result.returncode)
+
+        except subprocess.TimeoutExpired:
+            return f"The command took too long to execute (>{timeout}s)", "", "-1"
+        except Exception as e:
+            error_msg = f"Error: {repr(e)}"
+            return error_msg, error_msg, "-1"
+
     def run_python(self, code: str, timeout: int = 60) -> tuple[str, int]:
         """
         执行 Python 代码。
@@ -118,6 +159,7 @@ class KaggleRuntime:
         try:
             result = subprocess.run(
                 ['python', temp_path],
+                cwd=self.working_dir,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -166,7 +208,9 @@ class KaggleRuntime:
             if os.path.isdir(container_path):
                 shutil.copytree(container_path, local_path, dirs_exist_ok=True)
             else:
-                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                local_dir = os.path.dirname(local_path)
+                if local_dir:
+                    os.makedirs(local_dir, exist_ok=True)
                 shutil.copy2(container_path, local_path)
             self.logger.info(f"Copied {container_path} to {local_path}")
         except Exception as e:

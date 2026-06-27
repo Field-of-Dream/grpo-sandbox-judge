@@ -48,3 +48,4 @@ logs_*/
 logs_*
 output*
 temp_extract/
+.marscode/deviceInfo.json
