@@ -8,6 +8,13 @@ Agentic Reinforcement Learning Library using GRPO within a code sandbox.
 pip install grpo-in-sandbox
 ```
 
+Training requires extra dependencies:
+
+```bash
+pip install "grpo-in-sandbox[training]"   # pure TRL backend (transformers + trl + peft)
+pip install "grpo-in-sandbox[unsloth]"    # Unsloth-optimized backend (includes training deps)
+```
+
 Or from source:
 
 ```bash
@@ -25,11 +32,17 @@ from grpo_in_sandbox import train, RLHFTrainingConfig
 
 config = RLHFTrainingConfig(
     model_name_or_path="Qwen/Qwen2.5-0.5B-Instruct",
+    backend="trl",          # "auto" (default) | "trl" | "unsloth"
     num_train_epochs=3,
     learning_rate=1e-5,
 )
 results = train(config)
 ```
+
+The `backend` field selects how the policy model is loaded (both paths use TRL's
+`GRPOTrainer`): `"trl"` uses plain Transformers + PEFT, `"unsloth"` uses Unsloth's
+`FastLanguageModel` with vLLM fast inference, and `"auto"` prefers Unsloth when it
+is installed and otherwise falls back to `"trl"`.
 
 ### Using Custom Runtime
 

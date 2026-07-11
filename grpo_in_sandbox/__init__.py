@@ -55,6 +55,7 @@ def __getattr__(name):
             "ProductManager",
             "RewardModel",
             "RLHFTrainingConfig",
+            "TrainingBackend",
             "train",
         },
     }
@@ -73,6 +74,7 @@ def __getattr__(name):
 __all__ = [
     "train",
     "RLHFTrainingConfig",
+    "TrainingBackend",
     "ProductManager",
     "RewardModel",
     "CodeExecutor",
