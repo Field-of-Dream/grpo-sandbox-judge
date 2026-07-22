@@ -14,7 +14,7 @@ Usage:
     results = train(config)
 """
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 from .config import AgentConfig, load_config
 from .runtime import (
