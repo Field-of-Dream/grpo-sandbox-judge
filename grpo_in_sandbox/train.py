@@ -960,11 +960,21 @@ def _load_tokenizer(config: RLHFTrainingConfig):
     return tokenizer
 
 
-def _load_model_and_tokenizer_unsloth(config: RLHFTrainingConfig):
+def _load_model_and_tokenizer_unsloth(
+    config: RLHFTrainingConfig,
+    fast_inference: bool | None = None,
+):
     """Load model and tokenizer with Unsloth optimizations.
 
     Uses FastLanguageModel for efficient loading and optionally enables
     vLLM fast inference for accelerated generation during RL training.
+
+    Args:
+        config: Training configuration.
+        fast_inference: Effective vLLM fast-inference flag. When ``None``,
+            falls back to ``config.fast_inference``. Callers should pass the
+            resolved value (e.g. ``False`` when vllm is not installed) so this
+            loader never takes the vLLM path with a missing package.
     """
     try:
         from unsloth import FastLanguageModel
@@ -973,6 +983,10 @@ def _load_model_and_tokenizer_unsloth(config: RLHFTrainingConfig):
             "unsloth is required for backend='unsloth'. Install with: "
             "pip install 'grpo-in-sandbox[unsloth]' — or use backend='trl'."
         ) from e
+
+    effective_fast_inference = (
+        config.fast_inference if fast_inference is None else fast_inference
+    )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     log = _setup_logger(__name__)
@@ -984,11 +998,11 @@ def _load_model_and_tokenizer_unsloth(config: RLHFTrainingConfig):
         "model": config.model_name_or_path,
         "max_seq_length": config.max_seq_length,
         "load_in_4bit": True,
-        "fast_inference": config.fast_inference,
+        "fast_inference": effective_fast_inference,
     }
 
     # Only add gpu_memory_utilization if using fast_inference (vLLM)
-    if config.fast_inference:
+    if effective_fast_inference:
         model_kwargs["gpu_memory_utilization"] = config.vllm_gpu_memory_utilization
 
     model, _ = FastLanguageModel.from_pretrained(**model_kwargs)
@@ -1008,7 +1022,7 @@ def _load_model_and_tokenizer_unsloth(config: RLHFTrainingConfig):
     model = model.to(device)
 
     log.info(f"Model loaded with LoRA (rank={config.lora_rank}) on {device} [unsloth backend]")
-    if config.fast_inference:
+    if effective_fast_inference:
         log.info("vLLM fast inference enabled")
 
     return model, tokenizer, device
@@ -1079,11 +1093,18 @@ def _load_model_and_tokenizer_trl(config: RLHFTrainingConfig):
 def _load_model_and_tokenizer(
     config: RLHFTrainingConfig,
     backend: TrainingBackend | str | None = None,
+    *,
+    fast_inference: bool | None = None,
 ):
-    """Load model and tokenizer using the resolved training backend."""
+    """Load model and tokenizer using the resolved training backend.
+
+    ``fast_inference`` overrides ``config.fast_inference`` for the Unsloth
+    loader; pass ``False`` when vllm is unavailable so the vLLM path is not
+    taken during loading.
+    """
     resolved = _resolve_backend(backend if backend is not None else config.backend)
     if resolved is TrainingBackend.UNSLOTH:
-        return _load_model_and_tokenizer_unsloth(config)
+        return _load_model_and_tokenizer_unsloth(config, fast_inference=fast_inference)
     return _load_model_and_tokenizer_trl(config)
 
 
@@ -1191,8 +1212,23 @@ def train(
         except ImportError as e:
             log.warning(f"Could not apply PatchFastRL: {e}. Continuing with base Unsloth.")
 
+    # vLLM availability gates both the Unsloth fast-inference path (used during
+    # model loading) and TRL's GRPOConfig. Resolve it up front so we never hand
+    # the Unsloth loader fast_inference=True when vllm is missing — otherwise
+    # loading takes the vLLM path and fails before the later fallback runs.
+    vllm_available = find_spec("vllm") is not None
+    fast_inference = config.fast_inference
+    if fast_inference and not vllm_available:
+        log.warning(
+            "fast_inference=True but vllm is not installed; disabling Unsloth "
+            "vLLM fast inference and loading without it."
+        )
+        fast_inference = False
+
     # Step 2: Load model and tokenizer with LoRA
-    model, tokenizer, device = _load_model_and_tokenizer(config, backend)
+    model, tokenizer, device = _load_model_and_tokenizer(
+        config, backend, fast_inference=fast_inference
+    )
     log.info(f"Model loaded on device: {device}")
 
     # Step 3: Prepare dataset for GRPOTrainer
@@ -1246,7 +1282,7 @@ def train(
 
     # Step 5: Create GRPOConfig (disable vLLM when the package is unavailable)
     use_vllm = config.use_vllm
-    if use_vllm and find_spec("vllm") is None:
+    if use_vllm and not vllm_available:
         log.warning("use_vllm=True but vllm is not installed; falling back to HF generation.")
         use_vllm = False
     grpo_config = _create_grpo_config(config, use_vllm=use_vllm)
