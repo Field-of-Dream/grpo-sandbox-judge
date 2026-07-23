@@ -466,25 +466,40 @@ class RewardModel:
             if not test_code:
                 return 0.5
 
-            # Use tempfile to avoid file path conflicts in parallel execution
+            # Write the test to a host temp file, then copy it INTO the sandbox.
+            # Previously the host path was handed straight to runtime.run(), so a
+            # Docker/Kaggle runtime never saw the file and every test "failed".
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
-                test_file = f.name
+                host_test_file = f.name
                 f.write(test_code)
 
+            container_test_file = f"/tmp/grpo_reward_{os.getpid()}_{os.path.basename(host_test_file)}"
             try:
-                output, exit_code = self.runtime.run(f"python -m pytest {test_file} -v 2>&1 | head -50")
-                if exit_code == 0:
+                self.runtime.copy_to_container(host_test_file, container_test_file)
+
+                # Run pytest WITHOUT piping through `head`: a pipe reports head's
+                # exit status (always 0), masking real test failures. Truncate the
+                # output on the host side instead so the exit code stays honest.
+                output, exit_code = self.runtime.run(
+                    f"python -m pytest {container_test_file} -v 2>&1"
+                )
+                output = "\n".join(output.splitlines()[:50])
+
+                # runtime.run returns exit_code as a string ("0" on success);
+                # comparing to the int 0 was always False.
+                passed = str(exit_code) == "0"
+                output_lower = output.lower()
+                if passed:
                     return 1.0
-                elif "error" in output.lower() or "fail" in output.lower():
+                elif "error" in output_lower or "fail" in output_lower:
                     return 0.3
                 return 0.6
             finally:
-                # Clean up temp file
-                try:
-                    import os
-                    os.unlink(test_file)
-                except OSError:
-                    pass
+                # Clean up both the host temp file and the container copy.
+                with contextlib.suppress(OSError):
+                    os.unlink(host_test_file)
+                with contextlib.suppress(Exception):
+                    self.runtime.run(f"rm -f {container_test_file}")
         except Exception:
             return 0.5
 
@@ -1217,8 +1232,17 @@ def train(
     else:
         # Sandbox (default) mode
         rm = reward_model or RewardModel()
+        if getattr(rm, "runtime", None) is not None:
+            log.info("Using sandbox-based reward model (runtime attached)")
+        else:
+            # Be honest: with no runtime, scoring is keyword-only — not sandbox
+            # execution. Don't silently present heuristics as sandbox results.
+            log.warning(
+                "Sandbox reward mode selected but no runtime is attached; reward "
+                "will use keyword heuristics only. To run tests in a real sandbox, "
+                "pass reward_model=RewardModel(runtime=create_runtime(...))."
+            )
         reward_func = _create_reward_func_from_rm(rm)  # type: ignore[assignment]
-        log.info("Using sandbox-based reward model")
 
     # Step 5: Create GRPOConfig (disable vLLM when the package is unavailable)
     use_vllm = config.use_vllm

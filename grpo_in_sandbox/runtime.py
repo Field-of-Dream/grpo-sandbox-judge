@@ -152,6 +152,14 @@ class KaggleRuntime(BaseRuntime):
         self._runtime.copy_from_container(container_path, local_path)
 
 
+_NON_ISOLATION_WARNING = (
+    "%s runtime executes model-generated commands directly on the HOST machine "
+    "with no container isolation. Untrusted model/task output can read, modify, "
+    "or destroy host files and exfiltrate data. Only use this backend for trusted "
+    "inputs in a disposable environment."
+)
+
+
 def create_runtime(
     backend: str = "auto",
     **kwargs,
@@ -159,11 +167,18 @@ def create_runtime(
     """Create a runtime instance based on the environment.
 
     Args:
-        backend: Runtime backend ("docker", "kaggle", "local", "auto")
-        **kwargs: Additional arguments for the runtime
+        backend: Runtime backend ("docker", "kaggle", "local", "auto").
+        **kwargs: Additional arguments for the runtime.
 
     Returns:
-        BaseRuntime: A runtime instance
+        BaseRuntime: A runtime instance.
+
+    Raises:
+        ValueError: If ``backend`` is not a known backend name.
+        RuntimeError: If ``backend="auto"`` cannot obtain an isolated runtime.
+            ``auto`` fails closed: it never silently falls back to host
+            execution. Select ``backend="local"`` (or ``"kaggle"`` off Kaggle)
+            explicitly if you accept running commands on the host.
     """
     log = _setup_logger(__name__)
     log.info(f"Creating runtime with backend: {backend}")
@@ -178,8 +193,15 @@ def create_runtime(
             log.info("Auto-detected: Docker available")
             return DockerRuntime(**kwargs)
         except Exception as e:
-            log.info(f"Auto-detected: Using local (Docker not available: {e})")
-            return LocalRuntime(**kwargs)
+            # Fail closed: do NOT fall back to non-isolated host execution.
+            # Silently running model-generated commands on the host is a
+            # sandbox-escape by default and is never what "auto" should do.
+            raise RuntimeError(
+                "create_runtime(backend='auto') could not start an isolated "
+                f"Docker sandbox: {e}. Refusing to fall back to host execution. "
+                "Start the Docker daemon, or explicitly pass backend='local' "
+                "(or backend='kaggle') to accept running commands on the host."
+            ) from e
 
     backends = {
         "docker": DockerRuntime,
@@ -190,6 +212,12 @@ def create_runtime(
     if backend not in backends:
         available = ", ".join(["auto", *backends])
         raise ValueError(f"Unknown runtime backend: {backend!r}. Available: {available}")
+
+    # Explicit selection of a non-isolated backend is allowed, but loud.
+    if backend == "local":
+        log.warning(_NON_ISOLATION_WARNING, "LocalRuntime")
+    elif backend == "kaggle" and not os.environ.get("KAGGLE_KERNEL_TYPE"):
+        log.warning(_NON_ISOLATION_WARNING, "KaggleRuntime (outside Kaggle)")
 
     runtime_class = backends[backend]
     log.info(f"Created runtime: {runtime_class.__name__}")

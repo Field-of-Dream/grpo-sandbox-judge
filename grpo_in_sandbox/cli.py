@@ -462,12 +462,25 @@ def run_agent_query(
         with open(trajectory_file, "w") as f:
             json.dump(trajectory.to_dict(), f, indent=2, ensure_ascii=False)
 
-        # 打印完成横幅
+        # 打印完成横幅（区分已提交 / 超步数 / 出错）
         console.print()
-        console.print(Panel.fit(
-            f"[bold green]✅ 智能体在 {len(trajectory.steps)} 步内完成[/bold green]",
-            border_style="green",
-        ))
+        if trajectory.status == "completed":
+            console.print(Panel.fit(
+                f"[bold green]✅ 智能体已提交答案（{len(trajectory.steps)} 步）[/bold green]",
+                border_style="green",
+            ))
+        elif trajectory.status == "error":
+            console.print(Panel.fit(
+                f"[bold red]❌ 智能体运行出错（{len(trajectory.steps)} 步）："
+                f"{escape(str(trajectory.error))}[/bold red]",
+                border_style="red",
+            ))
+        else:
+            console.print(Panel.fit(
+                f"[bold yellow]⚠️ 智能体未提交答案，已达最大步数"
+                f"（{len(trajectory.steps)} 步）[/bold yellow]",
+                border_style="yellow",
+            ))
 
         # 打印输出路径
         console.print()
@@ -491,6 +504,9 @@ def run_agent_query(
                     border_style="cyan",
                     padding=(1, 2),
                 ))
+
+        # 返回轨迹（文档声明的返回值），供程序化调用者检查状态
+        return trajectory
 
     finally:
         # 清理

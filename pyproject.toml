@@ -63,6 +63,10 @@ quant = [
 Homepage = "https://github.com/Field-of-Dream/-grpo-sandbox-judge"
 Repository = "https://github.com/Field-of-Dream/-grpo-sandbox-judge"
 
+[project.scripts]
+llm-in-sandbox = "grpo_in_sandbox.cli:main"
+grpo-in-sandbox = "grpo_in_sandbox.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["grpo_in_sandbox*"]

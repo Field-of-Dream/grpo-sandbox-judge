@@ -6,12 +6,81 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import tarfile
 
-import docker
-import docker.errors
-
 from . import CMD_TIMEOUT, DOCKER_PATH
+
+# --- Archive-extraction safety limits (copy_from_container) -------------------
+# Untrusted container output is unpacked onto the host. Bound the work and reject
+# anything that could escape the destination directory.
+MAX_ARCHIVE_MEMBERS = 10000          # total entries permitted in one archive
+MAX_ARCHIVE_MEMBER_BYTES = 512 * 1024 * 1024   # per-file cap: 512 MiB
+MAX_ARCHIVE_TOTAL_BYTES = 2 * 1024 * 1024 * 1024  # whole-archive cap: 2 GiB
+
+# --- Docker hardening ---------------------------------------------------------
+# Applied to every container unless the caller explicitly overrides the key.
+# root-with-no-capabilities keeps the documented pip/mkdir workflow intact while
+# removing the kernel privileges an escape would need.
+DEFAULT_SECURITY_KWARGS: dict = {
+    "cap_drop": ["ALL"],
+    "security_opt": ["no-new-privileges:true"],
+    "pids_limit": 512,
+    "mem_limit": "4g",
+}
+
+# docker_kwargs that hand the container a path to the host and are always refused.
+_FORBIDDEN_DOCKER_KWARGS = {
+    "privileged",       # full host access
+    "devices",          # raw device access
+    "cap_add",          # re-granting dropped capabilities
+    "volumes",          # host bind mounts
+    "mounts",           # host bind mounts
+    "binds",            # host bind mounts
+    "volumes_from",     # inherit another container's mounts
+    "device_requests",  # GPUs/other host devices
+}
+
+
+def _validate_docker_kwargs(docker_kwargs: dict) -> None:
+    """Reject docker_kwargs that would break sandbox isolation.
+
+    Raises:
+        ValueError: if a forbidden key or a host-sharing value is present.
+    """
+    for key in _FORBIDDEN_DOCKER_KWARGS:
+        if docker_kwargs.get(key):
+            raise ValueError(
+                f"docker_kwargs[{key!r}] is not allowed: it can grant the sandbox "
+                "access to the host. Remove it to keep the container isolated."
+            )
+
+    # Host namespace sharing (network/pid/ipc/userns=host) defeats isolation.
+    for ns_key in ("network_mode", "pid_mode", "ipc_mode", "userns_mode", "network"):
+        value = docker_kwargs.get(ns_key)
+        if isinstance(value, str) and value.split(":", 1)[0] == "host":
+            raise ValueError(
+                f"docker_kwargs[{ns_key!r}]={value!r} shares a host namespace with "
+                "the sandbox and is not allowed."
+            )
+
+    # security_opt that turns off the default confinement profiles.
+    sec_opts = docker_kwargs.get("security_opt") or []
+    for opt in sec_opts:
+        normalized = str(opt).replace(" ", "").lower()
+        if normalized in ("seccomp=unconfined", "apparmor=unconfined", "systempaths=unconfined"):
+            raise ValueError(
+                f"docker_kwargs['security_opt'] entry {opt!r} disables kernel "
+                "confinement and is not allowed."
+            )
+
+
+def _is_within_directory(directory: str, target: str) -> bool:
+    """True if ``target`` resolves to a path inside ``directory``."""
+    directory = os.path.realpath(directory)
+    target = os.path.realpath(target)
+    prefix = directory if directory.endswith(os.sep) else directory + os.sep
+    return target == directory or target.startswith(prefix)
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -40,6 +109,7 @@ class DockerRuntime:
         self.docker_image = docker_image
         self.repo_path = repo_path
         self.command = command
+        _validate_docker_kwargs(docker_kwargs)
         self.docker_kwargs = docker_kwargs
 
         if logger is None:
@@ -55,6 +125,8 @@ class DockerRuntime:
             self.logger.setLevel(logging.WARNING)
         else:
             self.logger = logger
+
+        import docker  # lazy: keeps pure-Python helpers importable without the SDK
 
         self.client = docker.from_env(timeout=120)
 
@@ -78,6 +150,9 @@ class DockerRuntime:
         return f"{image_name_sanitized}-{hash_object.hexdigest()[:10]}"
 
     def start_container(self, docker_image: str, command: str, container_name: str, **docker_kwargs):
+        import docker
+        import docker.errors
+
         try:
             self.container = self.client.containers.get(container_name)
             assert self.container is not None
@@ -102,6 +177,13 @@ class DockerRuntime:
             **docker_kwargs.get("environment", {})
         }
 
+        # Hardened defaults; explicit docker_kwargs win (forbidden ones already
+        # rejected in __init__ via _validate_docker_kwargs).
+        run_kwargs = {
+            **DEFAULT_SECURITY_KWARGS,
+            **{k: v for k, v in docker_kwargs.items() if k != "environment"},
+        }
+
         self.container = self.client.containers.run(
             docker_image,
             command=command,
@@ -111,7 +193,7 @@ class DockerRuntime:
             tty=True,
             environment=env_vars,
             working_dir=self.repo_path,
-            **{k: v for k, v in docker_kwargs.items() if k != "environment"},
+            **run_kwargs,
         )
         self.logger.info(f"Started container: {container_name}")
 
@@ -262,36 +344,83 @@ class DockerRuntime:
             base_dir = os.path.basename(container_path.rstrip('/'))
 
             with tarfile.open(fileobj=tar_stream, mode='r') as tar:
-                # 处理所有成员：去除base_dir前缀并提取
-                members_to_extract = []
-                for member in tar.getmembers():
-                    # 跳过根目录本身
-                    if member.name == base_dir:
-                        continue
-
-                    # 去除路径中的基础目录
-                    if member.name.startswith(base_dir + '/'):
-                        member.name = member.name[len(base_dir) + 1:]
-
-                    if not member.name:
-                        continue
-
-                    members_to_extract.append(member)
-
-                # 提取所有成员（自动处理嵌套目录）
-                for member in members_to_extract:
-                    target_path = os.path.join(local_path, member.name)
-                    # 为所有类型（文件、目录、符号链接）创建父目录
-                    parent_dir = os.path.dirname(target_path)
-                    if parent_dir:
-                        os.makedirs(parent_dir, exist_ok=True)
-
-                    tar.extract(member, path=local_path)
+                self._safe_extract(tar, local_path, base_dir)
 
             self.logger.info(f"Copied {container_path} from container to {local_path}")
         except Exception as e:
             self.logger.error(f"Error copying from container: {repr(e)}")
             raise
+
+    def _safe_extract(self, tar: tarfile.TarFile, local_path: str, base_dir: str) -> None:
+        """Extract a container archive onto the host, rejecting escapes.
+
+        Container output is untrusted. Only regular files and directories are
+        written, and every destination is verified to stay inside ``local_path``.
+        Symlinks, hardlinks, device nodes and FIFOs are skipped, as are absolute
+        paths and ``..`` traversal. Extraction is bounded by member count and
+        size so a hostile archive cannot exhaust host disk.
+        """
+        dest_root = os.path.realpath(local_path)
+        total_bytes = 0
+        member_count = 0
+
+        for member in tar.getmembers():
+            # Strip the leading base_dir component (e.g. "output/foo" -> "foo").
+            name = member.name
+            if name == base_dir:
+                continue
+            if name.startswith(base_dir + "/"):
+                name = name[len(base_dir) + 1:]
+            if not name:
+                continue
+
+            member_count += 1
+            if member_count > MAX_ARCHIVE_MEMBERS:
+                raise ValueError(
+                    f"Archive exceeds {MAX_ARCHIVE_MEMBERS} members; refusing to extract."
+                )
+
+            # Reject absolute paths and parent-directory traversal outright.
+            if os.path.isabs(name) or ".." in name.split("/"):
+                self.logger.warning(f"Skipping unsafe archive member path: {member.name!r}")
+                continue
+
+            # Only regular files and directories are allowed onto the host.
+            if not (member.isfile() or member.isdir()):
+                self.logger.warning(
+                    f"Skipping non-regular archive member {member.name!r} "
+                    f"(type={member.type!r})"
+                )
+                continue
+
+            target_path = os.path.join(dest_root, name)
+            if not _is_within_directory(dest_root, target_path):
+                self.logger.warning(
+                    f"Skipping archive member escaping destination: {member.name!r}"
+                )
+                continue
+
+            if member.isdir():
+                os.makedirs(target_path, exist_ok=True)
+                continue
+
+            if member.size > MAX_ARCHIVE_MEMBER_BYTES:
+                raise ValueError(
+                    f"Archive member {name!r} is {member.size} bytes, exceeding the "
+                    f"{MAX_ARCHIVE_MEMBER_BYTES}-byte per-file limit."
+                )
+            total_bytes += member.size
+            if total_bytes > MAX_ARCHIVE_TOTAL_BYTES:
+                raise ValueError(
+                    f"Archive exceeds the {MAX_ARCHIVE_TOTAL_BYTES}-byte total limit."
+                )
+
+            os.makedirs(os.path.dirname(target_path) or dest_root, exist_ok=True)
+            source = tar.extractfile(member)
+            if source is None:
+                continue
+            with source, open(target_path, "wb") as dst:
+                shutil.copyfileobj(source, dst, length=1024 * 1024)
 
     def get_task_instruction(self, problem_statement: str) -> str:
         return problem_statement

@@ -21,7 +21,7 @@ agents:
       </guidelines>
     instance_prompt: |
       <request>
-      {task_description}
+      {problem_statement}
       </request>
       
       Please define the requirements and acceptance criteria.
@@ -47,7 +47,7 @@ agents:
       </guidelines>
     instance_prompt: |
       <request>
-      {task_description}
+      {problem_statement}
       </request>
       
       Design a UX solution. Describe the UI/UX approach.
@@ -73,7 +73,7 @@ agents:
       </guidelines>
     instance_prompt: |
       <request>
-      {task_description}
+      {problem_statement}
       </request>
       
       Implement the solution.
