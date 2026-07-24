@@ -80,8 +80,11 @@ def _safe_format(template: str, **kwargs) -> str:
     """
     try:
         return template.format_map(_SafeFormatDict(**kwargs))
-    except (ValueError, IndexError):
-        # Literal/unbalanced braces or positional fields — return as-is.
+    except (ValueError, IndexError, KeyError, AttributeError, TypeError):
+        # Literal/unbalanced braces, positional fields, or attribute/item
+        # access on a missing field (e.g. ``{task.description}`` /
+        # ``{task[description]}``) — return the template as-is rather than
+        # aborting the run.
         return template
 
 

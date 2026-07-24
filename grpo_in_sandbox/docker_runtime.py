@@ -150,6 +150,11 @@ class DockerRuntime:
         return f"{image_name_sanitized}-{hash_object.hexdigest()[:10]}"
 
     def start_container(self, docker_image: str, command: str, container_name: str, **docker_kwargs):
+        # Enforce the isolation policy on every container-creation path, not
+        # just __init__: start_container is public and forwards docker_kwargs
+        # straight to containers.run, so a direct caller must not be able to
+        # slip in privileged=True, host mounts, etc.
+        _validate_docker_kwargs(docker_kwargs)
         import docker
         import docker.errors
 
