@@ -8,13 +8,22 @@ Key Components:
 - RLHFTrainingConfig: Configuration for training
 - ProductManager: Task prompt generation
 - RewardModel: Sandbox-based reward scoring
-- GRPOTrainer (via TRL): Unsloth-optimized GRPO training with vLLM acceleration
+- GRPOTrainer (via TRL): GRPO training with a selectable backend
+
+Training backends (``RLHFTrainingConfig.backend``):
+- "trl":     Pure TRL + Transformers + PEFT (no Unsloth required).
+- "unsloth": Unsloth-optimized loading with vLLM fast inference.
+- "auto":    Use Unsloth if installed, otherwise fall back to pure TRL.
+
+Heavy dependencies (transformers/trl/peft/unsloth) are imported lazily inside
+the functions that need them, so importing this module only requires ``torch``.
 
 Usage:
     from grpo_in_sandbox import train, RLHFTrainingConfig
 
     config = RLHFTrainingConfig(
         model_name_or_path="Qwen/Qwen2.5-0.5B-Instruct",
+        backend="trl",
         num_train_epochs=3,
         max_steps=100,
     )
@@ -30,11 +39,10 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from importlib.util import find_spec
 from typing import Any
 
 import torch
-from transformers import AutoTokenizer
-from unsloth import FastLanguageModel
 
 # Module-level logger
 train_logger = logging.getLogger(__name__)
@@ -64,6 +72,23 @@ class AITrainerMode(str, Enum):
 
     SANDBOX = "sandbox"
     AI_JUDGE = "ai_judge"
+
+
+class TrainingBackend(str, Enum):
+    """Model-loading/training backend for GRPO.
+
+    Both backends drive TRL's ``GRPOTrainer``; they differ only in how the
+    policy model is loaded and optimized.
+
+    Attributes:
+        AUTO: Use UNSLOTH if the ``unsloth`` package is importable, else TRL.
+        TRL: Pure TRL + Transformers + PEFT. No Unsloth dependency.
+        UNSLOTH: Unsloth ``FastLanguageModel`` with vLLM fast inference.
+    """
+
+    AUTO = "auto"
+    TRL = "trl"
+    UNSLOTH = "unsloth"
 
 
 @dataclass
@@ -122,6 +147,14 @@ class RLHFTrainingConfig:
         output_dir: Directory for checkpoints and logs (default: "./output").
         seed: Random seed for reproducibility (default: 42).
 
+    Backend Parameters:
+        backend: Model-loading/training backend (default: "auto").
+            "trl"     -> pure TRL + Transformers + PEFT (no Unsloth required).
+            "unsloth" -> Unsloth FastLanguageModel with vLLM fast inference.
+            "auto"    -> use Unsloth if installed, else fall back to "trl".
+        load_in_4bit: Load the policy model in 4-bit (default: False).
+            Requires ``bitsandbytes``. Unsloth always loads in 4-bit.
+
     Early Stopping:
         patience: Epochs to wait before early stop (default: 3).
         min_improvement: Minimum improvement threshold (default: 0.01).
@@ -179,6 +212,10 @@ class RLHFTrainingConfig:
     output_dir: str = "./output"
     seed: int = 42
 
+    # Backend settings
+    backend: TrainingBackend | str = TrainingBackend.AUTO  # "auto" | "trl" | "unsloth"
+    load_in_4bit: bool = False  # 4-bit quantization for the TRL backend (needs bitsandbytes)
+
     # Early stopping
     patience: int = 3
     min_improvement: float = 0.01
@@ -201,6 +238,7 @@ class RLHFTrainingConfig:
             f"RLHFTrainingConfig("
             f"model={self.model_name_or_path}, "
             f"mode={self.mode.value}, "
+            f"backend={getattr(self.backend, 'value', self.backend)}, "
             f"lr={self.learning_rate}, "
             f"beta={self.beta}, "
             f"lora_rank={self.lora_rank}, "
@@ -428,25 +466,40 @@ class RewardModel:
             if not test_code:
                 return 0.5
 
-            # Use tempfile to avoid file path conflicts in parallel execution
+            # Write the test to a host temp file, then copy it INTO the sandbox.
+            # Previously the host path was handed straight to runtime.run(), so a
+            # Docker/Kaggle runtime never saw the file and every test "failed".
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
-                test_file = f.name
+                host_test_file = f.name
                 f.write(test_code)
 
+            container_test_file = f"/tmp/grpo_reward_{os.getpid()}_{os.path.basename(host_test_file)}"
             try:
-                output, exit_code = self.runtime.run(f"python -m pytest {test_file} -v 2>&1 | head -50")
-                if exit_code == 0:
+                self.runtime.copy_to_container(host_test_file, container_test_file)
+
+                # Run pytest WITHOUT piping through `head`: a pipe reports head's
+                # exit status (always 0), masking real test failures. Truncate the
+                # output on the host side instead so the exit code stays honest.
+                output, exit_code = self.runtime.run(
+                    f"python -m pytest {container_test_file} -v 2>&1"
+                )
+                output = "\n".join(output.splitlines()[:50])
+
+                # runtime.run returns exit_code as a string ("0" on success);
+                # comparing to the int 0 was always False.
+                passed = str(exit_code) == "0"
+                output_lower = output.lower()
+                if passed:
                     return 1.0
-                elif "error" in output.lower() or "fail" in output.lower():
+                elif "error" in output_lower or "fail" in output_lower:
                     return 0.3
                 return 0.6
             finally:
-                # Clean up temp file
-                try:
-                    import os
-                    os.unlink(test_file)
-                except OSError:
-                    pass
+                # Clean up both the host temp file and the container copy.
+                with contextlib.suppress(OSError):
+                    os.unlink(host_test_file)
+                with contextlib.suppress(Exception):
+                    self.runtime.run(f"rm -f {container_test_file}")
         except Exception:
             return 0.5
 
@@ -861,17 +914,38 @@ def _create_reward_func_from_rm(
     return reward_func
 
 
-def _load_model_and_tokenizer(config: RLHFTrainingConfig):
-    """Load model and tokenizer with Unsloth optimizations.
+def _resolve_backend(backend: TrainingBackend | str = TrainingBackend.AUTO) -> TrainingBackend:
+    """Resolve the effective training backend.
 
-    Uses FastLanguageModel for efficient loading and optionally enables
-    vLLM fast inference for accelerated generation during RL training.
+    ``AUTO`` picks Unsloth when the package is importable, otherwise pure TRL.
+
+    Raises:
+        ValueError: If ``backend`` is not a known backend name.
     """
+    try:
+        resolved = TrainingBackend(backend.lower() if isinstance(backend, str) else backend)
+    except ValueError:
+        available = ", ".join(b.value for b in TrainingBackend)
+        raise ValueError(
+            f"Unknown training backend: {backend!r}. Available: {available}"
+        ) from None
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    log = _setup_logger(__name__)
+    if resolved is not TrainingBackend.AUTO:
+        return resolved
+    return TrainingBackend.UNSLOTH if find_spec("unsloth") is not None else TrainingBackend.TRL
 
-    # Load tokenizer
+
+# LoRA projection modules shared by both backends (covers Llama/Qwen-style architectures)
+DEFAULT_TARGET_MODULES = [
+    "q_proj", "k_proj", "v_proj", "o_proj",
+    "gate_proj", "up_proj", "down_proj",
+]
+
+
+def _load_tokenizer(config: RLHFTrainingConfig):
+    """Load the tokenizer and normalize pad token / padding side for training."""
+    from transformers import AutoTokenizer
+
     tokenizer = AutoTokenizer.from_pretrained(
         config.model_name_or_path,
         trust_remote_code=True,
@@ -883,17 +957,52 @@ def _load_model_and_tokenizer(config: RLHFTrainingConfig):
 
     # Ensure padding side is set for training
     tokenizer.padding_side = "left"
+    return tokenizer
+
+
+def _load_model_and_tokenizer_unsloth(
+    config: RLHFTrainingConfig,
+    fast_inference: bool | None = None,
+):
+    """Load model and tokenizer with Unsloth optimizations.
+
+    Uses FastLanguageModel for efficient loading and optionally enables
+    vLLM fast inference for accelerated generation during RL training.
+
+    Args:
+        config: Training configuration.
+        fast_inference: Effective vLLM fast-inference flag. When ``None``,
+            falls back to ``config.fast_inference``. Callers should pass the
+            resolved value (e.g. ``False`` when vllm is not installed) so this
+            loader never takes the vLLM path with a missing package.
+    """
+    try:
+        from unsloth import FastLanguageModel
+    except ImportError as e:
+        raise ImportError(
+            "unsloth is required for backend='unsloth'. Install with: "
+            "pip install 'grpo-in-sandbox[unsloth]' — or use backend='trl'."
+        ) from e
+
+    effective_fast_inference = (
+        config.fast_inference if fast_inference is None else fast_inference
+    )
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    log = _setup_logger(__name__)
+
+    tokenizer = _load_tokenizer(config)
 
     # Load model with Unsloth
     model_kwargs = {
         "model": config.model_name_or_path,
         "max_seq_length": config.max_seq_length,
         "load_in_4bit": True,
-        "fast_inference": config.fast_inference,
+        "fast_inference": effective_fast_inference,
     }
 
     # Only add gpu_memory_utilization if using fast_inference (vLLM)
-    if config.fast_inference:
+    if effective_fast_inference:
         model_kwargs["gpu_memory_utilization"] = config.vllm_gpu_memory_utilization
 
     model, _ = FastLanguageModel.from_pretrained(**model_kwargs)
@@ -906,33 +1015,113 @@ def _load_model_and_tokenizer(config: RLHFTrainingConfig):
         "lora_dropout": config.lora_dropout,
         "use_gradient_checkpointing": "unsloth",  # Unsloth's long-context fine-tuning
         "random_state": config.seed,
+        "target_modules": config.target_modules or DEFAULT_TARGET_MODULES,
     }
-
-    if config.target_modules:
-        lora_kwargs["target_modules"] = config.target_modules
-    else:
-        # Auto-detect target modules (common for most models)
-        lora_kwargs["target_modules"] = [
-            "q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj",
-        ]
 
     model = FastLanguageModel.get_peft_model(**lora_kwargs)
     model = model.to(device)
 
-    log.info(f"Model loaded with LoRA (rank={config.lora_rank}) on {device}")
-    if config.fast_inference:
+    log.info(f"Model loaded with LoRA (rank={config.lora_rank}) on {device} [unsloth backend]")
+    if effective_fast_inference:
         log.info("vLLM fast inference enabled")
 
     return model, tokenizer, device
 
 
-def _create_grpo_config(config: RLHFTrainingConfig):
-    """Create TRL GRPOConfig from RLHFTrainingConfig."""
+def _load_model_and_tokenizer_trl(config: RLHFTrainingConfig):
+    """Load model and tokenizer with plain Transformers + PEFT (pure-TRL backend).
+
+    No Unsloth dependency: the policy is a standard ``AutoModelForCausalLM``
+    wrapped with a PEFT LoRA adapter, which TRL's GRPOTrainer consumes directly.
+    """
+    try:
+        from peft import LoraConfig, get_peft_model
+        from transformers import AutoModelForCausalLM
+    except ImportError as e:
+        raise ImportError(
+            "transformers and peft are required for backend='trl'. "
+            "Install with: pip install 'grpo-in-sandbox[training]'"
+        ) from e
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    log = _setup_logger(__name__)
+
+    tokenizer = _load_tokenizer(config)
+
+    model_kwargs: dict[str, Any] = {"trust_remote_code": True}
+    if device == "cuda":
+        model_kwargs["torch_dtype"] = (
+            torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        )
+
+    if config.load_in_4bit:
+        from transformers import BitsAndBytesConfig
+
+        model_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=model_kwargs.get("torch_dtype", torch.float16),
+        )
+        model_kwargs["device_map"] = "auto"
+
+    model = AutoModelForCausalLM.from_pretrained(config.model_name_or_path, **model_kwargs)
+
+    if config.load_in_4bit:
+        from peft import prepare_model_for_kbit_training
+
+        model = prepare_model_for_kbit_training(model)
+
+    lora_config = LoraConfig(
+        r=config.lora_rank,
+        lora_alpha=config.lora_alpha,
+        lora_dropout=config.lora_dropout,
+        target_modules=config.target_modules or DEFAULT_TARGET_MODULES,
+        bias="none",
+        task_type="CAUSAL_LM",
+    )
+    model = get_peft_model(model, lora_config)
+
+    # Quantized models are placed via device_map and must not be moved manually
+    if not config.load_in_4bit:
+        model = model.to(device)
+
+    log.info(f"Model loaded with LoRA (rank={config.lora_rank}) on {device} [trl backend]")
+    return model, tokenizer, device
+
+
+def _load_model_and_tokenizer(
+    config: RLHFTrainingConfig,
+    backend: TrainingBackend | str | None = None,
+    *,
+    fast_inference: bool | None = None,
+):
+    """Load model and tokenizer using the resolved training backend.
+
+    ``fast_inference`` overrides ``config.fast_inference`` for the Unsloth
+    loader; pass ``False`` when vllm is unavailable so the vLLM path is not
+    taken during loading.
+    """
+    resolved = _resolve_backend(backend if backend is not None else config.backend)
+    if resolved is TrainingBackend.UNSLOTH:
+        return _load_model_and_tokenizer_unsloth(config, fast_inference=fast_inference)
+    return _load_model_and_tokenizer_trl(config)
+
+
+def _create_grpo_config(config: RLHFTrainingConfig, use_vllm: bool | None = None):
+    """Create TRL GRPOConfig from RLHFTrainingConfig.
+
+    Args:
+        config: Source training configuration.
+        use_vllm: Effective vLLM switch; defaults to ``config.use_vllm``.
+    """
     try:
         from trl import GRPOConfig
     except ImportError as e:
         raise ImportError("trl library required. Install with: pip install trl") from e
+
+    if use_vllm is None:
+        use_vllm = config.use_vllm
 
     max_prompt_length = config.max_seq_length // 2
     max_completion_length = config.max_seq_length - max_prompt_length
@@ -963,8 +1152,8 @@ def _create_grpo_config(config: RLHFTrainingConfig):
         num_train_epochs=config.num_train_epochs,
 
         # vLLM
-        use_vllm=config.use_vllm,
-        vllm_mode="colocate" if config.use_vllm else None,
+        use_vllm=use_vllm,
+        vllm_mode="colocate" if use_vllm else None,
         vllm_gpu_memory_utilization=config.vllm_gpu_memory_utilization,
 
         # Logging
@@ -987,10 +1176,12 @@ def train(
     reward_model: RewardModel | None = None,
     ai_judge: AIJudge | None = None,
 ) -> dict[str, Any]:
-    """Run GRPO training using Unsloth's optimized GRPOTrainer.
+    """Run GRPO training using TRL's GRPOTrainer.
 
-    This function uses TRL's GRPOTrainer with Unsloth's PatchFastRL optimizations
-    for accelerated RL training with vLLM inference.
+    The model-loading backend is selected via ``config.backend``:
+    "trl" uses plain Transformers + PEFT (no Unsloth required), "unsloth"
+    uses Unsloth's PatchFastRL optimizations with vLLM fast inference, and
+    "auto" (default) picks Unsloth when installed, otherwise pure TRL.
 
     Args:
         config: RLHFTrainingConfig with model and training parameters
@@ -1009,17 +1200,35 @@ def train(
     random.seed(config.seed)
     os.makedirs(config.output_dir, exist_ok=True)
 
-    # Step 1: Patch TRL for Unsloth GRPO optimizations
-    log.info("Applying Unsloth optimizations to TRL...")
-    try:
-        from unsloth import FastLanguageModel, PatchFastRL
-        PatchFastRL(algorithm="grpo", FastLanguageModel=FastLanguageModel)
-        log.info("Unsloth PatchFastRL applied successfully")
-    except ImportError as e:
-        log.warning(f"Could not apply PatchFastRL: {e}. Continuing with base Unsloth.")
+    # Step 1: Resolve backend; patch TRL with Unsloth GRPO optimizations if applicable
+    backend = _resolve_backend(config.backend)
+    log.info(f"Training backend: {backend.value}")
+    if backend is TrainingBackend.UNSLOTH:
+        log.info("Applying Unsloth optimizations to TRL...")
+        try:
+            from unsloth import FastLanguageModel, PatchFastRL
+            PatchFastRL(algorithm="grpo", FastLanguageModel=FastLanguageModel)
+            log.info("Unsloth PatchFastRL applied successfully")
+        except ImportError as e:
+            log.warning(f"Could not apply PatchFastRL: {e}. Continuing with base Unsloth.")
+
+    # vLLM availability gates both the Unsloth fast-inference path (used during
+    # model loading) and TRL's GRPOConfig. Resolve it up front so we never hand
+    # the Unsloth loader fast_inference=True when vllm is missing — otherwise
+    # loading takes the vLLM path and fails before the later fallback runs.
+    vllm_available = find_spec("vllm") is not None
+    fast_inference = config.fast_inference
+    if fast_inference and not vllm_available:
+        log.warning(
+            "fast_inference=True but vllm is not installed; disabling Unsloth "
+            "vLLM fast inference and loading without it."
+        )
+        fast_inference = False
 
     # Step 2: Load model and tokenizer with LoRA
-    model, tokenizer, device = _load_model_and_tokenizer(config)
+    model, tokenizer, device = _load_model_and_tokenizer(
+        config, backend, fast_inference=fast_inference
+    )
     log.info(f"Model loaded on device: {device}")
 
     # Step 3: Prepare dataset for GRPOTrainer
@@ -1059,11 +1268,24 @@ def train(
     else:
         # Sandbox (default) mode
         rm = reward_model or RewardModel()
+        if getattr(rm, "runtime", None) is not None:
+            log.info("Using sandbox-based reward model (runtime attached)")
+        else:
+            # Be honest: with no runtime, scoring is keyword-only — not sandbox
+            # execution. Don't silently present heuristics as sandbox results.
+            log.warning(
+                "Sandbox reward mode selected but no runtime is attached; reward "
+                "will use keyword heuristics only. To run tests in a real sandbox, "
+                "pass reward_model=RewardModel(runtime=create_runtime(...))."
+            )
         reward_func = _create_reward_func_from_rm(rm)  # type: ignore[assignment]
-        log.info("Using sandbox-based reward model")
 
-    # Step 5: Create GRPOConfig
-    grpo_config = _create_grpo_config(config)
+    # Step 5: Create GRPOConfig (disable vLLM when the package is unavailable)
+    use_vllm = config.use_vllm
+    if use_vllm and not vllm_available:
+        log.warning("use_vllm=True but vllm is not installed; falling back to HF generation.")
+        use_vllm = False
+    grpo_config = _create_grpo_config(config, use_vllm=use_vllm)
 
     # Step 6: Initialize GRPOTrainer
     log.info("Initializing GRPOTrainer...")
@@ -1080,9 +1302,10 @@ def train(
         reward_funcs=reward_func,
     )
 
-    # Step 7: Prepare model for training
-    model = model.for_training()
-    log.info("Model prepared for training (for_training mode)")
+    # Step 7: Prepare model for training (Unsloth-specific mode switch)
+    if backend is TrainingBackend.UNSLOTH and hasattr(model, "for_training"):
+        model = model.for_training()
+        log.info("Model prepared for training (for_training mode)")
 
     # Step 8: Train!
     log.info("Starting GRPO training...")
@@ -1104,6 +1327,7 @@ def train(
     log.info("=" * 60)
 
     results = {
+        "backend": backend.value,
         "config": {
             "model_name_or_path": config.model_name_or_path,
             "lora_rank": config.lora_rank,

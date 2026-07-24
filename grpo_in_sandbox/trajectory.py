@@ -5,7 +5,7 @@
 每一步操作、思考、动作和观察结果。
 """
 
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, Field
 
@@ -53,12 +53,27 @@ class Trajectory(BaseModel):
         metadata: 附加元数据
         reward_calc_time: 奖励计算耗时（可选）
         test_output: 测试输出（可选）
+        status: 终止状态 - "completed"（已提交）、"max_steps"（超步数）或
+            "error"（运行出错）。
+        stop_reason: 停止原因的简短说明（如 "submit"、"max_steps"、"llm_error"）。
+        error: 错误信息（仅在 status == "error" 时有值）。
+        submitted: 智能体是否显式调用了 submit。
     """
+
+    # 终止状态常量
+    STATUS_COMPLETED: ClassVar[str] = "completed"
+    STATUS_MAX_STEPS: ClassVar[str] = "max_steps"
+    STATUS_ERROR: ClassVar[str] = "error"
+
     problem_statement: str
     steps: list[TrajectoryStep] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     reward_calc_time: float | None = None
     test_output: str | None = None
+    status: str = "max_steps"
+    stop_reason: str | None = None
+    error: str | None = None
+    submitted: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """
@@ -73,4 +88,8 @@ class Trajectory(BaseModel):
             "metadata": self.metadata,
             "reward_calc_time": self.reward_calc_time,
             "test_output": self.test_output,
+            "status": self.status,
+            "stop_reason": self.stop_reason,
+            "error": self.error,
+            "submitted": self.submitted,
         }

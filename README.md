@@ -1,6 +1,7 @@
 # GRPO-in-Sandbox Package
 
 Agentic Reinforcement Learning Library.
+It's from llm_in_sandbox（）
 
 ## Core API
 
@@ -46,6 +47,27 @@ from grpo_in_sandbox import train, RLHFTrainingConfig
 config = RLHFTrainingConfig(
     model_name_or_path="Qwen/Qwen2.5-0.5B-Instruct",
     num_train_epochs=3,
+)
+results = train(config)
+```
+
+### Training Backends
+
+`train()` drives TRL's `GRPOTrainer` with a selectable model-loading backend:
+
+| `backend` | Install | Notes |
+|-----------|---------|-------|
+| `"auto"` (default) | — | Uses Unsloth if installed, otherwise pure TRL |
+| `"trl"` | `pip install "grpo-in-sandbox[training]"` | Pure TRL + Transformers + PEFT, no Unsloth needed |
+| `"unsloth"` | `pip install "grpo-in-sandbox[unsloth]"` | Unsloth-optimized loading + vLLM fast inference |
+
+```python
+from grpo_in_sandbox import train, RLHFTrainingConfig
+
+config = RLHFTrainingConfig(
+    model_name_or_path="Qwen/Qwen2.5-0.5B-Instruct",
+    backend="trl",    # pure TRL — no Unsloth required
+    use_vllm=False,   # optional; auto-disabled when vllm is not installed
 )
 results = train(config)
 ```
@@ -112,5 +134,11 @@ trajectory = agent.run(
 )
 ```
 
-#需要安装的依赖项
-pip install "docker" "contextlib" "datetime" "dataclasses" "importlib" "pathlib" "fire" "yaml" "transformers" "torch" "tempfile"
+# 需要安装的依赖项
+
+```bash
+pip install grpo-in-sandbox               # 核心（沙箱 / Agent / CLI）
+pip install "grpo-in-sandbox[training]"   # + GRPO 训练（纯 TRL 后端：transformers/trl/peft/accelerate/torch）
+pip install "grpo-in-sandbox[unsloth]"    # + Unsloth 优化后端（含 training 依赖）
+pip install "grpo-in-sandbox[quant]"      # + bitsandbytes（load_in_4bit=True 时需要）
+```

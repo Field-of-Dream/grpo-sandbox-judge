@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git config *)",
+      "Bash(grep -rIn -E '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\\\.[a-zA-Z]{2,}' . --include='*.py' --include='*.toml' --include='*.cfg' --include='*.md' --include='*.txt' --include='*.yml' --include='*.yaml' --include='*.json' --include='*.ini')",
+      "WebFetch(domain:pypi.org)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" https://pypi.org/project/grpo-in-sandbox/)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" https://github.com/Field-of-Dream/grpo-sandbox-judge)",
+      "Bash(git log *)",
+      "Bash(git rev-list *)",
+      "Bash(grep -nE '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\\\.[a-zA-Z]{2,}' .git/COMMIT_EDITMSG)"
+    ]
+  }
+}

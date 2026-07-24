@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grpo-in-sandbox"
-version = "1.0.0"
+version = "0.2.1"
 description = "GRPO-based agentic RL training library with code sandbox environment"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -45,15 +45,27 @@ dev = [
     "pre-commit>=3.0.0",
 ]
 training = [
-    "unsloth>=2024.1.0",
     "transformers>=4.30.0",
     "torch>=2.0.0",
     "trl>=0.4.0",
+    "peft>=0.7.0",
+    "accelerate>=0.26.0",
+]
+unsloth = [
+    "grpo-in-sandbox[training]",
+    "unsloth>=2024.1.0",
+]
+quant = [
+    "bitsandbytes>=0.41.0",
 ]
 
 [project.urls]
 Homepage = "https://github.com/Field-of-Dream/-grpo-sandbox-judge"
 Repository = "https://github.com/Field-of-Dream/-grpo-sandbox-judge"
+
+[project.scripts]
+llm-in-sandbox = "grpo_in_sandbox.cli:main"
+grpo-in-sandbox = "grpo_in_sandbox.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

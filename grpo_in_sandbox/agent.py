@@ -62,6 +62,32 @@ def get_logger(name: str) -> logging.Logger:
 logger = get_logger(__name__)
 
 
+class _SafeFormatDict(dict):
+    """Mapping for str.format_map that leaves unknown fields untouched."""
+
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
+def _safe_format(template: str, **kwargs) -> str:
+    """Format ``template`` without crashing on unknown or stray placeholders.
+
+    Team/prompt YAML is user-authored and may use a placeholder the caller
+    doesn't supply (e.g. ``{task_description}`` vs ``{problem_statement}``) or
+    contain literal braces. Missing fields are left verbatim instead of raising
+    KeyError, so a template mismatch degrades gracefully rather than aborting a
+    run.
+    """
+    try:
+        return template.format_map(_SafeFormatDict(**kwargs))
+    except (ValueError, IndexError, KeyError, AttributeError, TypeError):
+        # Literal/unbalanced braces, positional fields, or attribute/item
+        # access on a missing field (e.g. ``{task.description}`` /
+        # ``{task[description]}``) — return the template as-is rather than
+        # aborting the run.
+        return template
+
+
 # Configuration dataclass
 @dataclass
 class AgentArgs:
@@ -346,14 +372,19 @@ class Agent:
         self.logger.info(f"max_tokens_per_call={max_tokens_per_call}")
         self.logger.info(f"temperature={temperature}")
 
-        system_prompt = self.system_prompt_template.format(
+        system_prompt = _safe_format(
+            self.system_prompt_template,
             command_docs="",
             demo="",
         )
 
         if self.instance_prompt_template:
-            user_prompt = self.instance_prompt_template.format(
+            user_prompt = _safe_format(
+                self.instance_prompt_template,
                 problem_statement=problem_statement,
+                # Backward-compatible alias for older team YAML that used
+                # {task_description} instead of {problem_statement}.
+                task_description=problem_statement,
             )
         else:
             user_prompt = problem_statement
@@ -374,6 +405,8 @@ class Agent:
 
         done = False
         step_count = 0
+        run_error: str | None = None
+        stop_reason = "max_steps"
 
         while not done and step_count < max_steps:
             self.console.print()
@@ -400,6 +433,8 @@ class Agent:
                 )
             except Exception as e:
                 self.logger.error(f"LLM query failed: {e}")
+                run_error = str(e)
+                stop_reason = "llm_error"
                 break
 
             # Extract reasoning_content from response
@@ -497,15 +532,29 @@ class Agent:
             # Check if done
             if action.function_name == "submit":
                 done = True
+                stop_reason = "submit"
                 self.logger.info("Agent submitted answer")
 
             step_count += 1
+
+        # Determine terminal status
+        if run_error is not None:
+            status = Trajectory.STATUS_ERROR
+        elif done:
+            status = Trajectory.STATUS_COMPLETED
+        else:
+            status = Trajectory.STATUS_MAX_STEPS
+            stop_reason = "max_steps"
 
         # Create trajectory
         trajectory = Trajectory(
             problem_statement=problem_statement,
             steps=self.trajectory_steps,
             metadata={"total_steps": step_count},
+            status=status,
+            stop_reason=stop_reason,
+            error=run_error,
+            submitted=done,
         )
 
         return trajectory

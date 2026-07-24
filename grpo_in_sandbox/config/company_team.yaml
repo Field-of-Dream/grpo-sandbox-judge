@@ -21,7 +21,7 @@ agents:
       </guidelines>
     instance_prompt: |
       <task>
-      {task_description}
+      {problem_statement}
       </task>
       
       As the Technical Lead, please:
@@ -50,7 +50,7 @@ agents:
       </guidelines>
     instance_prompt: |
       <task>
-      {task_description}
+      {problem_statement}
       </task>
       
       Please implement a solution to this problem.
@@ -77,7 +77,7 @@ agents:
       </guidelines>
     instance_prompt: |
       <task>
-      {task_description}
+      {problem_statement}
       </task>
       
       If you have any questions about this task, please ask.

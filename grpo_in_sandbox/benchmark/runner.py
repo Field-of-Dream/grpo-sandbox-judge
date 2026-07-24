@@ -27,6 +27,29 @@ from pathlib import Path
 import yaml
 
 
+def _safe_path_component(value, kind: str) -> str:
+    """Validate that a dataset-supplied string is a single safe path component.
+
+    Dataset content is untrusted: ``problem_id`` and ``input_files`` keys flow
+    into host filesystem paths (temp dirs, log files, container copies). A value
+    containing a path separator, ``..``, a leading ``/`` or a null byte could
+    escape the intended directory, so reject those outright.
+
+    Raises:
+        ValueError: if ``value`` is not a safe single path component.
+    """
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Unsafe {kind}: expected a non-empty string, got {value!r}")
+    if value in (".", ".."):
+        raise ValueError(f"Unsafe {kind}: {value!r}")
+    if "/" in value or "\\" in value or "\x00" in value:
+        raise ValueError(f"Unsafe {kind} (path separators not allowed): {value!r}")
+    if os.path.basename(value) != value or os.path.isabs(value):
+        raise ValueError(f"Unsafe {kind} (must be a bare filename): {value!r}")
+    return value
+
+
+
 @dataclass
 class BenchmarkResult:
     """
@@ -262,7 +285,9 @@ def create_agent_runner(
             for filename, content in input_files.items():
                 if content is None:
                     continue
-                temp_path = Path(temp_dir) / filename
+                # Filenames come from the (untrusted) dataset; reject traversal.
+                safe_name = _safe_path_component(filename, "input file name")
+                temp_path = Path(temp_dir) / safe_name
                 temp_path.write_text(content)
             runtime.copy_dir_to_container(temp_dir, str(input_dir))
 
@@ -454,9 +479,13 @@ def run_single_problem(args: dict) -> BenchmarkResult:
     ground_truth = problem["ground_truth"]
     problem_statement = problem["problem_statement"]
 
+    # problem_id is dataset-controlled and is used to build host paths
+    # (litellm_logs/<id>, logs/<id>.txt) — enforce it is a bare component.
+    safe_problem_id = _safe_path_component(str(problem_id), "problem id")
+
     # 为每个问题创建输出目录用于litellm日志（仅在启用时）
     save_litellm_response = agent_config.get("save_litellm_response", False)
-    problem_output_dir = os.path.join(output_dir, "litellm_logs", problem_id) if save_litellm_response else None
+    problem_output_dir = os.path.join(output_dir, "litellm_logs", safe_problem_id) if save_litellm_response else None
     if problem_output_dir:
         os.makedirs(problem_output_dir, exist_ok=True)
 
@@ -527,7 +556,7 @@ def run_single_problem(args: dict) -> BenchmarkResult:
         log_text += f"评分: {score:.4f}\n"
         log_text += f"{'=' * 80}\n"
 
-        log_path = os.path.join(logs_dir, f"{problem_id}.txt")
+        log_path = os.path.join(logs_dir, f"{safe_problem_id}.txt")
         with open(log_path, "w") as f:
             f.write(log_text)
 
@@ -569,7 +598,7 @@ def run_single_problem(args: dict) -> BenchmarkResult:
         log_text += f"错误：{error_str}\n"
         log_text += f"标准答案: {ground_truth}\n"
 
-        log_path = os.path.join(logs_dir, f"{problem_id}.txt")
+        log_path = os.path.join(logs_dir, f"{safe_problem_id}.txt")
         with open(log_path, "w") as f:
             f.write(log_text)
 
