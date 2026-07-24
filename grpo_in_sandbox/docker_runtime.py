@@ -364,7 +364,24 @@ class DockerRuntime:
         total_bytes = 0
         member_count = 0
 
-        for member in tar.getmembers():
+        # Iterate lazily with ``tar.next()`` instead of ``getmembers()``: the
+        # latter parses every header into an in-memory list up front, so a
+        # hostile archive with a huge number of entries could exhaust host
+        # memory before the member-count bound below is ever enforced. Reading
+        # one header at a time keeps memory flat and lets us abort early.
+        while True:
+            member = tar.next()
+            if member is None:
+                break
+
+            # Count every header read so a flood of entries (including ones
+            # skipped below) cannot bypass the bound or spin indefinitely.
+            member_count += 1
+            if member_count > MAX_ARCHIVE_MEMBERS:
+                raise ValueError(
+                    f"Archive exceeds {MAX_ARCHIVE_MEMBERS} members; refusing to extract."
+                )
+
             # Strip the leading base_dir component (e.g. "output/foo" -> "foo").
             name = member.name
             if name == base_dir:
@@ -373,12 +390,6 @@ class DockerRuntime:
                 name = name[len(base_dir) + 1:]
             if not name:
                 continue
-
-            member_count += 1
-            if member_count > MAX_ARCHIVE_MEMBERS:
-                raise ValueError(
-                    f"Archive exceeds {MAX_ARCHIVE_MEMBERS} members; refusing to extract."
-                )
 
             # Reject absolute paths and parent-directory traversal outright.
             if os.path.isabs(name) or ".." in name.split("/"):
